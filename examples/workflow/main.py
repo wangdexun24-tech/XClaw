@@ -45,7 +45,7 @@ class SummarizeNode(Node):
     """让模型总结素材（这里用 call_llm_simple，不需要维护对话历史）。
     如果维护对话历史的话，每次都会访问前一次的结果，会造成token的浪费
     """
-
+    
     def exec(self, payload: Any) -> Tuple[str, Any]:
         prompt = f"请用三句话总结下面这段代码在做什么：\n\n{payload}"
         summary = call_llm_simple(prompt)
