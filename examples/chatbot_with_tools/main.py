@@ -17,6 +17,7 @@ from typing import Any, Tuple
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from core.memory import Memory
 from core.llm import call_llm              # noqa: E402
 from core.node import Flow, Node, shared   # noqa: E402
 from tools import ToolExecutor             # noqa: E402
@@ -42,39 +43,41 @@ class ChatNode(Node):
     """调模型，并根据是否返回 tool_calls 决定下一步。"""
 
     def exec(self, payload: Any) -> Tuple[str, Any]:
-        messages = shared["messages"]
+        memory: Memory = shared["memory"]
 
         assistant_message = call_llm(
-            messages=messages,
+            messages=memory.build_context(SYSTEM_PROMPT),   # ← system + 长期记忆 + 历史
             tools=shared["tools"],
-            system_prompt=SYSTEM_PROMPT,
         )
-        # ⚠️ 关键：先把 assistant 消息写进历史（含 tool_calls），再去执行工具
-        messages.append(assistant_message)
+        # usage 要在 append 之前取：append 会把它过滤掉（它是给程序看的元数据）
+        usage = assistant_message.get("usage") or {}
+        saved = memory.append(assistant_message)             # ← 落盘 + 字段过滤
 
-        content = assistant_message.get("content") or ""
+        content = saved.get("content") or ""
         if content:
             print(f"\n🤖 助手：{content}")
 
-        tool_calls = assistant_message.get("tool_calls")
+        tool_calls = saved.get("tool_calls")
         if not tool_calls:
-            return "done", assistant_message        # 没有后继 → Flow 结束
+            # 一轮结束了：这时才检查要不要压缩（在工具轮中间压缩会拆散配对）
+            memory.maybe_compress(usage.get("total_tokens", 0))
+            return "done", saved                    # 没有后继 → Flow 结束
 
         # 防止模型无限调工具
         round_index = shared.get("tool_round", 0) + 1
         shared["tool_round"] = round_index
         if round_index > MAX_TOOL_ROUNDS:
             print(f"\n⚠️ 已达到最大工具轮数 {MAX_TOOL_ROUNDS}，停止调用工具")
-            return "done", assistant_message
+            return "done", saved
 
-        return "tool_call", assistant_message       # 有工具要执行 → 走另一条边
+        return "tool_call", saved                   # 有工具要执行 → 走另一条边
 
 class ToolCallNode(Node):
     """执行模型请求的工具，并把结果作为 tool 消息写回历史。"""
 
     def exec(self, payload: Any) -> Tuple[str, Any]:
         assistant_message = payload
-        messages = shared["messages"]
+        memory: Memory = shared["memory"]
         executor: ToolExecutor = shared["tool_executor"]
 
         tool_calls = executor.parse_tool_calls(assistant_message)
@@ -87,7 +90,7 @@ class ToolCallNode(Node):
             print(f"           → {preview}")
 
             # 每条 tool_call 对应一条 tool 消息，靠 tool_call_id 配对
-            messages.append(result.to_message())
+            memory.append(result.to_message())          # ← 落盘
 
         return "chat", None        # ← 回到 ChatNode，这就是"环"
 
@@ -105,14 +108,21 @@ def run_chat() -> None:
     print("=" * 60)
     print("🤖 XClaw Agent（带工具的对话）")
     print("=" * 60)
-    print("输入 exit / quit 退出，/clear 清空对话历史\n")
+    print("输入 exit / quit 退出；/clear 清空对话记忆；/remember <内容> 记住一件事\n")
 
     # 初始化共享状态（每个示例开头都要做的事）
     shared.clear()
-    shared["messages"] = []
     executor = ToolExecutor()
     shared["tool_executor"] = executor
     shared["tools"] = executor.get_llm_tools()      # 8 个工具的协议描述
+
+    # 记忆：会自动读回上次的对话
+    memory = Memory(PROJECT_ROOT / "chat_memory")
+    shared["memory"] = memory
+    if memory.messages:
+        print(f"[memory] 已恢复上次对话：{len(memory.messages)} 条消息")
+    else:
+        print("[memory] 这是新的对话")
 
     tool_names = [t["function"]["name"] for t in shared["tools"]]
     print(f"可用工具：{', '.join(tool_names)}")
@@ -130,13 +140,18 @@ def run_chat() -> None:
             print("再见！")
             break
         if user_input == "/clear":
-            shared["messages"] = []
-            print("[已清空对话历史]\n")
+            shared["memory"].clear()
+            print("[已清空对话记忆（长期记忆保留）]\n")
+            continue
+        if user_input.startswith("/remember "):
+            fact = user_input[len("/remember "):]
+            shared["memory"].remember(fact)
+            print(f"[已记住] {fact.strip()}\n")
             continue
         if not user_input:
             continue
 
-        shared["messages"].append({"role": "user", "content": user_input})
+        shared["memory"].append({"role": "user", "content": user_input})
         shared["tool_round"] = 0            # ← 每轮提问重置计数器（重要）
         flow.run(None)                      # 一环一环跑到没有后继
 
