@@ -21,6 +21,7 @@ from core.memory import Memory
 from core.llm import call_llm              # noqa: E402
 from core.node import Flow, Node, shared   # noqa: E402
 from tools import ToolExecutor             # noqa: E402
+from tools.builtins import Tool            # noqa: E402
 
 MAX_TOOL_ROUNDS = 8          # 一轮提问里，最多允许"模型↔工具"循环几次
 TOOL_PREVIEW = 300           # 打印工具结果时的截断长度
@@ -104,7 +105,12 @@ def build_flow() -> Flow:
     return Flow(chat)
 
 
-def run_chat() -> None:
+def run_chat(extra_tools: list[Tool] | None = None) -> None:
+    """启动对话。
+
+    extra_tools：额外注册的工具（Day 7 的 MCP 远程工具就从这个口子进来）。
+    —— 注意主循环（ChatNode / ToolCallNode / build_flow）这三块**一行都没改**。
+    """
     print("=" * 60)
     print("🤖 XClaw Agent（带工具的对话）")
     print("=" * 60)
@@ -113,8 +119,11 @@ def run_chat() -> None:
     # 初始化共享状态（每个示例开头都要做的事）
     shared.clear()
     executor = ToolExecutor()
+    if extra_tools:
+        names = executor.register(extra_tools)
+        print(f"[外部工具] 已注册 {len(names)} 个：{', '.join(names)}")
     shared["tool_executor"] = executor
-    shared["tools"] = executor.get_llm_tools()      # 8 个工具的协议描述
+    shared["tools"] = executor.get_llm_tools()      # 所有工具的协议描述
 
     # 记忆：会自动读回上次的对话
     memory = Memory(PROJECT_ROOT / "chat_memory")

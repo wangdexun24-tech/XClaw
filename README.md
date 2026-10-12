@@ -5,8 +5,8 @@
 用约 90 行实现了一套图编排框架，把「模型 → 工具 → 模型」的循环表达成**图里的一个环**；
 在此之上逐层叠加出 workflow、chatbot 和带工具的 agent。
 
-**当前进度**：轻框架 → 模型接入 → 多轮对话 → 工具系统 → agent 主循环，已完成并可运行。
-记忆、MCP、Skill、长任务模式在路线图中（见文末）。
+**当前进度**：轻框架 → 模型接入 → 多轮对话 → 工具系统 → agent 主循环 → 记忆 → MCP，
+已完成并可运行。Skill、长任务模式在路线图中（见文末）。
 
 ---
 
@@ -14,12 +14,18 @@
 
 - **手写图编排框架**（`core/node.py`，约 90 行）：用 `a - "action" >> b` 在代码里画出流程；
   agent 主循环不是写在循环体里，而是**图里的一个环**（`ChatNode ⇄ ToolCallNode`）
-- **完整的工具系统**（8 个工具 + 统一执行器）：Pydantic 定义参数并自动生成给模型的工具说明；
-  参数以 JSON 传递（解析容错）；工具异常统一规范化为 `tool` 消息，而不是让循环崩掉
+- **完整的工具系统**（8 个工具 + 统一执行器）：用声明式 `Tool(name, description, parameters, fn)`
+  登记工具，`to_llm_format()` 统一转成模型协议；参数以 JSON 传递（解析容错）；
+  工具异常统一规范化为 `tool` 消息，而不是让循环崩掉
+- **记忆系统**：对话逐条落盘（jsonl，重启续聊）+ 长期记忆（MEMORY.md，注入 system prompt）
+  + 按 token 用量触发的上下文压缩，并且能正确处理"崩溃在工具调用中间"的恢复
+- **MCP 支持**：把跑在独立进程里的工具接进同一套 `Tool` 接口，
+  接入点只有一个 `register()`；执行器与主循环完全不需要知道 MCP 的存在
 - **协议层正确性**：严格遵循 `assistant(tool_calls)` ↔ `tool(tool_call_id)` 的配对规则，
   支持一次回复中的多个工具调用，且保证消息数量与顺序合法
-- **渐进式示例**：`workflow → chatbot → chatbot_with_tools`，每层只引入一个新概念，**每个都能独立运行**
-- **可离线验证**：工具层与核心循环都能脱离真实模型测试（脚本化假模型 + 断言），验证时不消耗 API 额度
+- **渐进式示例**：`workflow → chatbot → chatbot_with_tools → chatbot_with_mcp`，
+  每层只引入一个新概念，**每个都能独立运行**
+- **可离线验证**：工具层、记忆、MCP 都能脱离真实模型测试（脚本化假模型 + 断言），验证时不消耗 API 额度
 
 ---
 
@@ -51,7 +57,7 @@ OPENAI_BASE_URL=https://api.deepseek.com/v1
 OPENAI_MODEL_ID=deepseek-chat
 ```
 
-### 三个示例，按难度递增运行
+### 四个示例，按难度递增运行
 
 ```bash
 # ① workflow：三个节点串联，让模型总结一个文件
@@ -62,6 +68,18 @@ python -m examples.chatbot.main
 
 # ③ agent：能读代码、改文件、跑命令（项目核心）
 python -m examples.chatbot_with_tools.main
+
+# ④ agent + MCP：在 ③ 的基础上，外加一个独立进程里的远程工具集
+python -m examples.chatbot_with_mcp.main
+```
+
+离线自检（不消耗 API 额度，随时可以跑）：
+
+```bash
+python day1_check.py      # 图编排：线性 / 分支 / 循环
+python tools_check.py     # 工具层：8 个工具 + 错误路径 + tool_calls 解析
+python memory_check.py    # 记忆：字段过滤 / 崩溃恢复 / 压缩边界 / 长期记忆
+python mcp_check.py       # MCP：连接 / 转换 / 注册 / 调用 / 错误路径 / 收尾
 ```
 
 ---
@@ -105,14 +123,21 @@ python -m examples.chatbot_with_tools.main
                     │
         core/node.py  (Node / Flow / shared)      ← 图编排：决定"下一步去哪"
                     │
+        core/memory.py (Memory)                   ← 对话落盘 + 长期记忆 + 上下文压缩
+                    │
         core/llm.py   (call_llm / call_llm_simple)← 唯一调用模型的地方
                     │
         tools/executor.py (ToolExecutor)          ← 解析 tool_calls、执行、规范化结果
                     │
-        tools/builtins/ (8 个工具)                 ← 真正干活：读写文件、跑命令、搜索
+        ┌───────────┴───────────┐
+        │                       │
+  tools/builtins/ (8 个工具)   tools/mcp/ (client + adapter)  ← 把远端工具翻译成同一个 Tool
+        │                       │
+  读写文件/跑命令/搜索       另一个进程里的 MCP 服务器
 ```
 
 **依赖是单向的**：示例依赖 `core` 和 `tools`，反过来不依赖；`core` 不知道 `tools` 的存在。
+`ToolExecutor` 也不知道 MCP 的存在 —— 它只认 `Tool` 那四样东西。
 
 ### agent 主循环 = 图里的一个环
 
@@ -145,6 +170,49 @@ python -m examples.chatbot_with_tools.main
 
 ---
 
+### MCP：让"不在本进程里的工具"也能用
+
+Day 4 的工具都是函数调用（`read` / `bash` 就在本进程里）。但真实世界的工具常常不在：
+可能是另一个进程（本地 CLI、MCP 服务器），也可能是另一台机器（HTTP 服务）。
+每接一个新工具就改一遍 agent 是不现实的，MCP（Model Context Protocol）就是给这件事定的标准。
+
+**协议本身只有两件事**，而且相互独立：
+
+1. **说什么**：JSON-RPC 2.0 —— `tools/list` 拿工具清单，`tools/call` 调工具
+2. **怎么运**：transport —— 改 `transport` 就能从 stdio 换到 HTTP，**约定不变**
+
+**接入路径只有四步**，全部代码都在 `tools/mcp/`：
+
+```
+MCPClient.start()         有连接了（后台线程跑 event loop，把 async 包成 sync）
+        │
+        ▼
+client.list_tools()       拿到远端工具清单（name / description / inputSchema）
+        │
+        ▼
+to_local_tools(client)    ← 关键一步：适配成 Tool(name, description, parameters, fn)
+        │
+        ▼
+executor.register(...)    挂进执行器，和 8 个本地工具平起平坐
+```
+
+对执行器来说，远程工具和本地 `read` 没有任何区别 —— **这是 Day 4 把工具接口定型成
+`Tool` 契约的回报**：接入 MCP 没有改动 `ToolExecutor`、`ChatNode`、`ToolCallNode`、`call_llm` 中的任何一行逻辑。
+
+```bash
+$ python mcp_check.py
+① 远程工具 3 个：['server_info', 'calc', 'query_notes']
+③ 工具总数 8 → 11
+④ calc: 61.285714285714285
+   server_info: {'cwd': '.../XClaw', 'pid': 95093}   ← 进程号和主进程不同，证明确实在另一个进程里
+⑤ calc({'expression': 'import os'}) → [工具失败] ...（远程异常被规范化，没有炸掉循环）
+```
+
+**MCP 的代价**：远端工具的完整说明每次请求都要塞进 prompt，工具一多就浪费 token。
+这正是下一步 Skill（渐进式加载）要解决的问题。
+
+---
+
 ## 关键设计决策
 
 | 决策 | 为什么这样做 | 代价 / 取舍 |
@@ -158,7 +226,13 @@ python -m examples.chatbot_with_tools.main
 | **工具失败返回文本，不抛异常** | 模型只能看到返回值；抛出去等于让模型"瞎掉"，它就没机会改正参数 | 调用方需要自己判断 `is_error`；换来 agent 能自我纠错 |
 | 工具分成**三层**（纯函数 / `Tool` 定义 / Executor） | 换 LLM 协议只改 `to_llm_format()`；换执行策略只改 Executor；工具函数可单独测试 | 文件多一些；换来关注点分离 |
 | 命令执行返回 **`{stdout, stderr, exit_code}`**，非零退出码不算失败 | "命令跑起来了但结果失败"是**正常结果**，模型需要看到错误信息才能修 | 调用方要处理 dict；换来可区分"没跑起来"和"跑了但失败" |
-| **只维护 3 个示例，而不是一个大程序** | 每个示例只引入一个新概念（图 → 模型 → 状态 → 工具），**都能独立运行、独立验证** | 会有一点重复代码；换来可教学性和可定位性 |
+| **只维护一组渐进式小示例，而不是一个大程序** | 每个示例只引入一个新概念（图 → 模型 → 状态 → 工具 → 外部工具），**都能独立运行、独立验证** | 会有一点重复代码；换来可教学性和可定位性 |
+| 对话用 **jsonl 追加**而不是每次重写整个文件 | 追加便宜，且前缀不变更容易命中服务商的 prefix KV cache；坏一行只坏一行 | 需要自己处理"读回时把没走完的一轮丢掉"的恢复逻辑 |
+| 压缩**只在"一轮结束"时触发** | 在工具轮中间压缩会把 `assistant(tool_calls)` 和 `tool` 结果拆散，API 直接报错 | 需要判断边界；换来历史永远合法 |
+| MCP 客户端用**后台线程 + 常驻事件循环** | MCP 官方客户端是 async，而 agent 是同步的；连接必须复用，不能每次调用都重启子进程 | 多一层线程桥；换来同步代码里可直接用远程工具 |
+| 连接在**同一个任务里 enter/exit** | anyio 的 cancel scope 要求进出同任务，否则退出时报 `Attempted to exit cancel scope in a different task` | 写法稍绕（`_serve()` 长驻）；换来退出干净、不留僵尸进程 |
+| 适配器把远程错误**抛成异常**而不是返回错误字符串 | Executor 只认"抛异常 → `is_error=True`"这一条通路，模型才知道自己失败了 | 多一层转换；换来远程/本地工具的错误处理完全一致 |
+| `ToolExecutor` **不认识 MCP** | 执行器不该关心工具"在哪跑"；接入新来源只需在外部转换 | 需要调用方管理连接生命周期；换来关注点分离 |
 
 ---
 
@@ -168,19 +242,27 @@ python -m examples.chatbot_with_tools.main
 XClaw/
 ├── core/
 │   ├── node.py              # 图编排：Node / Flow / shared（92 行）
-│   └── llm.py               # 模型接入：call_llm / call_llm_simple
+│   ├── llm.py               # 模型接入：call_llm / call_llm_simple
+│   └── memory.py            # 记忆：对话落盘 + 长期记忆 + 上下文压缩
 ├── tools/
 │   ├── executor.py          # ToolCall / ToolResult / ToolExecutor
-│   └── builtins/
-│       ├── tool_def.py      # Tool 类 + get_builtin_tools()（含给模型看的说明）
-│       ├── read.py  write.py  edit.py  bash.py       # 核心四件套
-│       └── ls.py    grep.py   find.py  search.py     # 探索与联网
+│   ├── builtins/
+│   │   ├── tool_def.py      # Tool 类 + get_builtin_tools()（含给模型看的说明）
+│   │   ├── read.py  write.py  edit.py  bash.py       # 核心四件套
+│   │   └── ls.py    grep.py   find.py  search.py     # 探索与联网
+│   └── mcp/
+│       ├── server.py        # MCP 服务器：把普通函数注册成远程工具
+│       ├── client.py        # MCP 客户端：后台线程 + 常驻连接（async → sync）
+│       └── adapter.py       # 适配器：MCP 工具 → 本地 Tool
 ├── examples/
 │   ├── workflow/            # ① 三节点串联
 │   ├── chatbot/             # ② 多轮对话（共享历史）
-│   └── chatbot_with_tools/  # ③ agent 主循环（图里的环）
+│   ├── chatbot_with_tools/  # ③ agent 主循环（图里的环）
+│   └── chatbot_with_mcp/    # ④ 在本机工具之外再加一组远程工具
 ├── day1_check.py            # 图编排验收：线性 / 分支 / 循环
 ├── tools_check.py           # 工具层验收：8 工具 + 错误路径 + tool_calls 解析
+├── memory_check.py          # 记忆验收：字段过滤 / 崩溃恢复 / 压缩边界 / 长期记忆
+├── mcp_check.py             # MCP 验收：连接 / 转换 / 注册 / 调用 / 错误路径 / 收尾
 ├── requirements.txt
 └── .env.example
 ```
@@ -204,9 +286,10 @@ XClaw/
 
 - **语言**：Python 3.11+（类型注解 + dataclass）
 - **模型接入**：OpenAI 兼容协议（`openai` SDK），支持任意兼容服务
-- **数据校验**：Pydantic（工具参数模型 + 自动生成 JSON Schema）
+- **工具协议**：手写 JSON Schema 声明参数，统一由 `to_llm_format()` 转成模型协议
 - **编排**：自研 `Node` / `Flow`（无第三方 agent 框架）
-- **依赖**：`openai`、`python-dotenv`、`ddgs`（仅这三个）
+- **外部工具**：MCP（`mcp` 官方客户端 + `fastmcp` 服务器端）
+- **依赖**：`openai`、`python-dotenv`、`ddgs`、`mcp`、`fastmcp`（只有这五个）
 
 ---
 
@@ -217,8 +300,8 @@ XClaw/
 - [x] 多轮对话（共享对话历史）
 - [x] 工具系统（8 个工具 + 执行器 + 注册表）
 - [x] **agent 主循环**（图里的环 + tool 消息配对 + 最大轮数保护）
-- [ ] 记忆：对话持久化（重启续聊）+ 长期记忆 + 上下文自动压缩
-- [ ] MCP：把远端工具接入同一套 `Tool` 接口
+- [x] 记忆：对话持久化（重启续聊）+ 长期记忆 + 上下文自动压缩
+- [x] **MCP：把远端工具接入同一套 `Tool` 接口**
 - [ ] Skill：按需加载的操作手册（渐进式加载，降低 prompt 开销）
 - [ ] 长任务模式：给一个目标，自主多轮执行直到满足完成判据
 - [ ] 工程化：打包成命令行工具、引入测试、危险操作确认机制
@@ -230,10 +313,11 @@ XClaw/
 - **`bash` 不是沙箱**：`shell=True` 提供了管道/重定向的便利，但也意味着模型可以执行任意命令。
   目前只有"最大轮数"作为兜底；**计划加入危险操作确认机制**（写/改/执行前询问用户）
 - **`search` 依赖外网**：网络不可用时该工具会返回错误（模型会据此改用其他工具）
-- 会话历史目前**只存在内存**里，重启即丢失（路线图中"记忆"一项会解决）
-- 上下文没有压缩机制：长对话会持续增长 `prompt_tokens`（同样由"记忆"一项解决）
 - 工具说明每次请求都会全量带给模型；工具数量增多后需要考虑按需加载（即 Skill 的思路）
-- 暂未引入自动化测试框架，目前用两个验收脚本（`day1_check.py` / `tools_check.py`）保证核心行为
+- **上下文压缩是有损的**：摘要会丢细节，所以阈值设在 90%，且只在"一轮结束"时触发
+- 压缩后保留的是"最近 N 条原文 + 一份摘要"，**不保证与原对话逐字等价**
+- 长任务模式尚未实现：目前一次提问内的工具循环有 `MAX_TOOL_ROUNDS` 上限，但**没有"目标 + 完成判据"**的概念
+- 暂未引入自动化测试框架，目前用四个验收脚本（`day1_check.py` / `tools_check.py` / `memory_check.py` / `mcp_check.py`）保证核心行为
 
 ---
 

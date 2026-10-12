@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-from .builtins import get_builtin_tools
+from .builtins import Tool, get_builtin_tools
 
 
 @dataclass
@@ -53,11 +53,28 @@ class ToolResult:
 
 
 class ToolExecutor:
-    """解析 + 执行。"""
+    """解析 + 执行。
 
-    def __init__(self) -> None:
-        self.tools = get_builtin_tools()
+    默认带 8 个内置工具；用 register() 可以再挂上外部工具（Day 7 的 MCP 工具）。
+
+    ⚠️ 注意本类**完全不知道 MCP 的存在** —— 它只认 Tool 那四样东西。
+    这不是偷懒，是设计：执行器不该关心工具"在哪跑"。
+    """
+
+    def __init__(self, tools: list[Tool] | None = None) -> None:
+        self.tools: list[Tool] = list(tools) if tools is not None else get_builtin_tools()
         self.tool_map = {tool.name: tool for tool in self.tools}
+
+    def register(self, tools: list[Tool]) -> list[str]:
+        """注册外部工具。同名则以新注册的为准，返回最终生效的名字列表。"""
+        for tool in tools:
+            existing = self.tool_map.get(tool.name)
+            if existing is not None:
+                self.tools[self.tools.index(existing)] = tool
+            else:
+                self.tools.append(tool)
+        self.tool_map = {tool.name: tool for tool in self.tools}
+        return [tool.name for tool in tools]
 
     def get_llm_tools(self) -> list[dict]:
         """给 call_llm 用的工具列表。"""
