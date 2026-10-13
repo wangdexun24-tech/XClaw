@@ -5,8 +5,8 @@
 用约 90 行实现了一套图编排框架，把「模型 → 工具 → 模型」的循环表达成**图里的一个环**；
 在此之上逐层叠加出 workflow、chatbot 和带工具的 agent。
 
-**当前进度**：轻框架 → 模型接入 → 多轮对话 → 工具系统 → agent 主循环 → 记忆 → MCP，
-已完成并可运行。Skill、长任务模式在路线图中（见文末）。
+**当前进度**：轻框架 → 模型接入 → 多轮对话 → 工具系统 → agent 主循环 → 记忆 → MCP → Skill，
+已完成并可运行。长任务模式在路线图中（见文末）。
 
 ---
 
@@ -23,7 +23,9 @@
   接入点只有一个 `register()`；执行器与主循环完全不需要知道 MCP 的存在
 - **协议层正确性**：严格遵循 `assistant(tool_calls)` ↔ `tool(tool_call_id)` 的配对规则，
   支持一次回复中的多个工具调用，且保证消息数量与顺序合法
-- **渐进式示例**：`workflow → chatbot → chatbot_with_tools → chatbot_with_mcp`，
+- **Skill（渐进式披露）**：操作手册只在**模型主动点名时**才加载，常驻 prompt 的只有一行清单；
+  10 份手册全量注入和按需加载的差距，在 `skill_check.py` 里有实测数字
+- **渐进式示例**：`workflow → chatbot → chatbot_with_tools → chatbot_with_mcp → chatbot_with_skills`，
   每层只引入一个新概念，**每个都能独立运行**
 - **可离线验证**：工具层、记忆、MCP 都能脱离真实模型测试（脚本化假模型 + 断言），验证时不消耗 API 额度
 
@@ -57,7 +59,7 @@ OPENAI_BASE_URL=https://api.deepseek.com/v1
 OPENAI_MODEL_ID=deepseek-chat
 ```
 
-### 四个示例，按难度递增运行
+### 五个示例，按难度递增运行
 
 ```bash
 # ① workflow：三个节点串联，让模型总结一个文件
@@ -71,6 +73,9 @@ python -m examples.chatbot_with_tools.main
 
 # ④ agent + MCP：在 ③ 的基础上，外加一个独立进程里的远程工具集
 python -m examples.chatbot_with_mcp.main
+
+# ⑤ agent + Skill：在 ③ 的基础上，外加一批"按需加载的操作手册"
+python -m examples.chatbot_with_skills.main
 ```
 
 离线自检（不消耗 API 额度，随时可以跑）：
@@ -80,6 +85,7 @@ python day1_check.py      # 图编排：线性 / 分支 / 循环
 python tools_check.py     # 工具层：8 个工具 + 错误路径 + tool_calls 解析
 python memory_check.py    # 记忆：字段过滤 / 崩溃恢复 / 压缩边界 / 长期记忆
 python mcp_check.py       # MCP：连接 / 转换 / 注册 / 调用 / 错误路径 / 收尾
+python skill_check.py     # Skill：渐进式加载 / frontmatter 容错 / 幂等 / 接入
 ```
 
 ---
@@ -94,6 +100,15 @@ python mcp_check.py       # MCP：连接 / 转换 / 注册 / 调用 / 错误路�
 | `看一下 core/node.py 是干什么的，用三句话总结` | `read` 读取文件 → 总结（`[flow]` 日志会显示循环走了 3 步） |
 | `在 tmp_demo 目录下创建一个 hello.py，内容是打印 hello xclaw，然后运行它` | `write` 创建文件 → `bash` 执行 → 回报输出 |
 | `哪个文件定义了 call_llm 这个函数？` | `grep` 搜索 → 返回 `core/llm.py:44` |
+
+而在 MCP / Skill 示例里，它能做的事会变多（工具变多了，模型自己选）：
+
+| 输入 | 它做的事 |
+|---|---|
+| `(128*3+45)/7 等于多少？` | 调用远程 MCP 工具 `calc`（跑在**另一个进程**里） |
+| `团队知识库里关于值班的约定是什么？` | 调用远程 MCP 工具 `query_notes` |
+| `帮我看看 tools/builtins/edit.py 有什么问题` | **先加载** `code-review` 手册 → 再 `read` → 按手册的格式输出 |
+| `我这次改动该怎么写提交信息？` | **先加载** `commit-message` 手册 → `git diff` → 按规范生成 |
 
 运行时会打印每步的工具调用与结果：
 
@@ -129,15 +144,27 @@ python mcp_check.py       # MCP：连接 / 转换 / 注册 / 调用 / 错误路�
                     │
         tools/executor.py (ToolExecutor)          ← 解析 tool_calls、执行、规范化结果
                     │
-        ┌───────────┴───────────┐
-        │                       │
-  tools/builtins/ (8 个工具)   tools/mcp/ (client + adapter)  ← 把远端工具翻译成同一个 Tool
-        │                       │
-  读写文件/跑命令/搜索       另一个进程里的 MCP 服务器
+        ┌───────────┼───────────┬───────────┐
+        │           │           │           │
+ tools/builtins/  tools/mcp/    tools/skills/
+   (8 个工具)    (client+adapter) (loader+tool)
+        │           │           │
+  读写文件/跑命令  MCP 服务器     skills/*/SKILL.md
+    /搜索          （另一个进程）  （按需加载的手册）
 ```
 
 **依赖是单向的**：示例依赖 `core` 和 `tools`，反过来不依赖；`core` 不知道 `tools` 的存在。
-`ToolExecutor` 也不知道 MCP 的存在 —— 它只认 `Tool` 那四样东西。
+`ToolExecutor` 既不知道 MCP、也不知道 Skill 的存在 —— 它只认 `Tool` 那四样东西。
+
+**两条接入路径完全同构**，都是"把别的东西翻译成 `Tool`，再 `register()` 进来"：
+
+```
+tools/mcp/    远程的**动作**  →  MCPClient + to_local_tools()   →  executor.register()
+tools/skills/ 本地的**知识**  →  SkillLoader + build_skill_tool() →  executor.register()
+                     两者都没让 主循环 / 执行器 / llm 改动一行
+```
+
+这就是「先定接口、再扩能力」的收益：能力可以无限加，核心永远不用动。
 
 ### agent 主循环 = 图里的一个环
 
@@ -213,6 +240,69 @@ $ python mcp_check.py
 
 ---
 
+### Skill：按需加载的操作手册
+
+有些能力不是"一个动作"，而是"一整套流程和领域知识"（怎么审查代码、怎么排查报错、
+这个项目的提交信息怎么写）。它们写不成函数，只能写成**手册**。
+
+把手册全塞进 system prompt 的代价是线性的：50 份 × 约 2000 token = 10 万 token，
+而一次对话通常只用得上其中一份。解法叫**渐进式披露**，分三个阶段：
+
+```
+阶段① 扫描        启动时只解析 YAML frontmatter（name + description），正文不进上下文
+        │
+阶段② 注入        每次请求只带一张清单（N × 约 25 token），塞进 skill 工具的 description
+        │
+阶段③ 加载        模型主动调用 skill(name=...) 时，才把正文读出来
+```
+
+**为什么能接进已有的 agent**：产物仍然是一个 `Tool(name, description, parameters, fn)`。
+所以和 Day 7 的 MCP 一样 —— 靠 `executor.register()` 一个口子进来，**主循环零改动**。
+
+区别在于这两个字的含义：
+
+| | MCP | Skill |
+|---|---|---|
+| 接进来的是什么 | 别处跑的**动作** | 本地的**知识/流程** |
+| prompt 占用 | 全部工具的完整说明，每次都带 | 只有一行清单常驻；正文按需 |
+| 谁执行 | 代码执行 | 模型读完之后自己动手 |
+| 数量级 | 十来个 | 可以几十上百 |
+
+**手册长这样**（`skills/code-review/SKILL.md`）：
+
+```markdown
+---
+name: code-review
+description: 按团队规范审查 Python 代码。当用户要求 review、检查代码、找 bug、看代码风格，
+             或问"这段代码有什么问题"时，先加载本手册再动手。
+---
+
+# 代码审查流程
+## 硬性检查（逐条过，不要跳）
+1. 边界条件：空输入、None、越界、除零
+...
+```
+
+**两个设计要点，也是大多数实现失败的地方：**
+
+1. **`description` 是"路由信息"，不是"介绍"**。模型只靠它判断"现在该不该加载"，
+   所以必须写**什么时候用**，而不是"这是什么"。
+2. **整个技能库只是一个工具**（`skill`，用 JSON Schema 的 `enum` 约束可选项），
+   而不是 N 个工具 —— 否则每份手册的说明都要常驻 prompt，又回到了全量注入。
+
+**实测数据**（`skill_check.py` 输出，3 份手册）：
+
+```
+· 注入成本：约 243 字符
+· 若全量注入正文：约 2393 字符
+· 节省：90%
+```
+
+手册越多、越长，这个比例越高。另外还有一层**幂等保护**：
+同一份手册第二次被点名时只回一句"已经在上下文里了"，不再重复塞全文。
+
+---
+
 ## 关键设计决策
 
 | 决策 | 为什么这样做 | 代价 / 取舍 |
@@ -233,6 +323,10 @@ $ python mcp_check.py
 | 连接在**同一个任务里 enter/exit** | anyio 的 cancel scope 要求进出同任务，否则退出时报 `Attempted to exit cancel scope in a different task` | 写法稍绕（`_serve()` 长驻）；换来退出干净、不留僵尸进程 |
 | 适配器把远程错误**抛成异常**而不是返回错误字符串 | Executor 只认"抛异常 → `is_error=True`"这一条通路，模型才知道自己失败了 | 多一层转换；换来远程/本地工具的错误处理完全一致 |
 | `ToolExecutor` **不认识 MCP** | 执行器不该关心工具"在哪跑"；接入新来源只需在外部转换 | 需要调用方管理连接生命周期；换来关注点分离 |
+| Skill 做成**一个工具 + `enum`**，而不是 N 个工具 | 工具列表每次请求都要付 token；N 个工具等于让每份手册常驻 prompt | 模型要多一步"先加载再动手"；换来常驻成本从 O(正文) 降到 O(一行说明) |
+| frontmatter 只支持 **`key: value` 单行** | 我们的元数据只有 name/description 两个单行字段，手写解析 15 行足够 | 支持不了列表/多行；真需要时换 `yaml.safe_load`（**不是** `yaml.load`，那能构造任意 Python 对象） |
+| 缺 `description` 的手册**直接丢弃** | 没法路由的手册留在索引里只会干扰模型判断 | 少一份手册；换来索引里每一条都是"可用"的 |
+| 记录已加载手册（`loaded` 集合） | 同一份手册读两遍纯属浪费 token | `loaded` 不感知上下文压缩，这是已知缺陷（见"已知限制"） |
 
 ---
 
@@ -244,25 +338,33 @@ XClaw/
 │   ├── node.py              # 图编排：Node / Flow / shared（92 行）
 │   ├── llm.py               # 模型接入：call_llm / call_llm_simple
 │   └── memory.py            # 记忆：对话落盘 + 长期记忆 + 上下文压缩
+├── skills/                  # 操作手册（YAML frontmatter + 正文）
+│   ├── code-review/SKILL.md
+│   ├── commit-message/SKILL.md
+│   └── debug-python/SKILL.md
 ├── tools/
 │   ├── executor.py          # ToolCall / ToolResult / ToolExecutor
 │   ├── builtins/
 │   │   ├── tool_def.py      # Tool 类 + get_builtin_tools()（含给模型看的说明）
 │   │   ├── read.py  write.py  edit.py  bash.py       # 核心四件套
 │   │   └── ls.py    grep.py   find.py  search.py     # 探索与联网
-│   └── mcp/
-│       ├── server.py        # MCP 服务器：把普通函数注册成远程工具
-│       ├── client.py        # MCP 客户端：后台线程 + 常驻连接（async → sync）
-│       └── adapter.py       # 适配器：MCP 工具 → 本地 Tool
+│   ├── mcp/
+│   │   ├── server.py        # MCP 服务器：把普通函数注册成远程工具
+│   │   ├── client.py        # MCP 客户端：后台线程 + 常驻连接（async → sync）
+│   │   └── adapter.py       # 适配器：MCP 工具 → 本地 Tool
+│   └── skills/
+│       └── loader.py        # SkillLoader（扫描/解析）+ build_skill_tool（注入/加载）
 ├── examples/
 │   ├── workflow/            # ① 三节点串联
 │   ├── chatbot/             # ② 多轮对话（共享历史）
 │   ├── chatbot_with_tools/  # ③ agent 主循环（图里的环）
-│   └── chatbot_with_mcp/    # ④ 在本机工具之外再加一组远程工具
+│   ├── chatbot_with_mcp/    # ④ 在本机工具之外再加一组远程工具
+│   └── chatbot_with_skills/ # ⑤ 再加一批按需加载的操作手册
 ├── day1_check.py            # 图编排验收：线性 / 分支 / 循环
 ├── tools_check.py           # 工具层验收：8 工具 + 错误路径 + tool_calls 解析
 ├── memory_check.py          # 记忆验收：字段过滤 / 崩溃恢复 / 压缩边界 / 长期记忆
 ├── mcp_check.py             # MCP 验收：连接 / 转换 / 注册 / 调用 / 错误路径 / 收尾
+├── skill_check.py           # Skill 验收：渐进式加载 / 容错 / 幂等 / 接入
 ├── requirements.txt
 └── .env.example
 ```
@@ -289,6 +391,7 @@ XClaw/
 - **工具协议**：手写 JSON Schema 声明参数，统一由 `to_llm_format()` 转成模型协议
 - **编排**：自研 `Node` / `Flow`（无第三方 agent 框架）
 - **外部工具**：MCP（`mcp` 官方客户端 + `fastmcp` 服务器端）
+- **知识注入**：自研 Skill 加载器（YAML frontmatter + 渐进式披露，无第三方依赖）
 - **依赖**：`openai`、`python-dotenv`、`ddgs`、`mcp`、`fastmcp`（只有这五个）
 
 ---
@@ -302,7 +405,7 @@ XClaw/
 - [x] **agent 主循环**（图里的环 + tool 消息配对 + 最大轮数保护）
 - [x] 记忆：对话持久化（重启续聊）+ 长期记忆 + 上下文自动压缩
 - [x] **MCP：把远端工具接入同一套 `Tool` 接口**
-- [ ] Skill：按需加载的操作手册（渐进式加载，降低 prompt 开销）
+- [x] **Skill：按需加载的操作手册（渐进式加载，降低 prompt 开销）**
 - [ ] 长任务模式：给一个目标，自主多轮执行直到满足完成判据
 - [ ] 工程化：打包成命令行工具、引入测试、危险操作确认机制
 
@@ -313,11 +416,16 @@ XClaw/
 - **`bash` 不是沙箱**：`shell=True` 提供了管道/重定向的便利，但也意味着模型可以执行任意命令。
   目前只有"最大轮数"作为兜底；**计划加入危险操作确认机制**（写/改/执行前询问用户）
 - **`search` 依赖外网**：网络不可用时该工具会返回错误（模型会据此改用其他工具）
-- 工具说明每次请求都会全量带给模型；工具数量增多后需要考虑按需加载（即 Skill 的思路）
+- **MCP 工具**的说明仍然是每次请求全量带给模型的（只有 Skill 做到了按需加载）；
+  远程工具一多，这层开销还会回来 —— 可以考虑把 MCP 工具也做成"按需披露"的两级结构
 - **上下文压缩是有损的**：摘要会丢细节，所以阈值设在 90%，且只在"一轮结束"时触发
 - 压缩后保留的是"最近 N 条原文 + 一份摘要"，**不保证与原对话逐字等价**
+- **Skill 的 `loaded` 集合不感知上下文压缩**：如果某份手册的正文被压成了摘要、
+  而 `loaded` 还记着"已加载"，模型就再也读不到正文了（`skill_check.py` 末尾留了这个思考题）
+- Skill 的 frontmatter 解析器只支持 `key: value` 单行，放不了列表和多行文本
 - 长任务模式尚未实现：目前一次提问内的工具循环有 `MAX_TOOL_ROUNDS` 上限，但**没有"目标 + 完成判据"**的概念
-- 暂未引入自动化测试框架，目前用四个验收脚本（`day1_check.py` / `tools_check.py` / `memory_check.py` / `mcp_check.py`）保证核心行为
+- 暂未引入自动化测试框架，目前用五个验收脚本（`day1_check.py` / `tools_check.py` /
+  `memory_check.py` / `mcp_check.py` / `skill_check.py`）保证核心行为
 
 ---
 
