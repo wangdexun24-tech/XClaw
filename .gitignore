@@ -5,3 +5,5 @@ __pycache__/
 .idea/
 .DS_Store
 chat_memory/
+goal_memory/
+goal_runs/

@@ -18,13 +18,15 @@
 和 Day 7 接 MCP 一样，靠 `executor.register()` 一个口子进来，主循环零改动。
 
 ## 已知的取舍（诚实标注）
-1. 本模块只支持 "key: value" 单行的 frontmatter，这是**刻意的子集**：
-   我们的元数据只有 name / description 两个单行字段。要放列表或多行文本时就换
-   `yaml.safe_load`（必须是 safe_load —— `yaml.load` 能构造任意 Python 对象，是安全坑）。
-2. `scan()` 其实仍把整个文件读进了内存（为了简单）。省的是 **token**，不是磁盘 IO。
+1. `scan()` 其实仍把整个文件读进了内存（为了简单）。省的是 **token**，不是磁盘 IO。
    要做到连 IO 都省，可以只读前 4KB 去找 frontmatter 的结束位置。
-3. `loaded` 集合只记"哪份手册加载过"，不感知 Day 6 的上下文压缩。
+2. `loaded` 集合只记"哪份手册加载过"，不感知 Day 6 的上下文压缩。
    如果正文被压缩成摘要、而 loaded 还记着它，模型就再也读不到正文了。
+
+## Day 9 的改动：解析器下沉了
+frontmatter 解析本来住在本文件里。Day 9 的任务文件（goals/*.md）需要同一套能力，
+于是把它提到了 `core/frontmatter.py` —— **同一份逻辑被第二个地方需要，就该提取出来**。
+`parse_skill_file` 这个名字保留成一层薄包装，免得调用方被迫改名。
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from core.frontmatter import as_text, parse_frontmatter
 from tools.builtins.tool_def import Tool
 
 SKILL_FILE = "SKILL.md"
@@ -65,31 +68,14 @@ class Skill:
 
 
 def parse_skill_file(text: str) -> tuple[dict[str, str], str]:
-    """把文件切成 (frontmatter 字典, 正文)。
+    """Day 8 的老名字，保留作为兼容入口（实现已经搬到 core/frontmatter.py）。
 
-    元数据和正文必须在物理上分开，否则"只读元数据"就无从谈起。
-    只支持 "key: value" 单行形式 —— 见模块开头的取舍说明。
+    有意思的是：这次重构之所以敢做，正是因为 Day 8 写的 skill_check.py
+    会立刻告诉你有没有改坏 —— **测试的价值不是"证明代码对"，
+    而是"让你敢改代码"**。
     """
-    if not text.startswith("---"):
-        return {}, text                      # 没有 frontmatter（当作纯正文）
-
-    lines = text.splitlines()
-    end = None
-    for index in range(1, len(lines)):
-        if lines[index].strip() == "---":
-            end = index
-            break
-    if end is None:
-        return {}, text                      # 没闭合 → 当作没有 frontmatter
-
-    meta: dict[str, str] = {}
-    for line in lines[1:end]:
-        # partition 只按**第一个**冒号切，value 里再有冒号也不会被切断
-        key, sep, value = line.partition(":")
-        if sep and key.strip():
-            meta[key.strip()] = value.strip().strip('"').strip("'")
-
-    return meta, "\n".join(lines[end + 1:]).strip()
+    data, body = parse_frontmatter(text)
+    return {key: value for key, value in data.items() if isinstance(value, str)}, body
 
 
 class SkillLoader:
@@ -124,9 +110,10 @@ class SkillLoader:
             self.warnings.append(f"读不了 {path}：{exc}")
             return
 
-        meta, _body = parse_skill_file(text)      # ← 下划线表示"刻意丢弃"
-        name = (meta.get("name") or path.parent.name).strip()
-        description = (meta.get("description") or "").strip()
+        meta, _body = parse_frontmatter(text)     # ← 下划线表示"刻意丢弃"
+        # 用 as_text 而不是直接 .strip()：frontmatter 的值可能是列表，硬 strip 会崩
+        name = as_text(meta.get("name")) or path.parent.name
+        description = as_text(meta.get("description"))
 
         if not description:
             # 没有 description 就没法被路由：模型不知道**什么时候**该用它。

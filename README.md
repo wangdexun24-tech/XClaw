@@ -5,8 +5,8 @@
 用约 90 行实现了一套图编排框架，把「模型 → 工具 → 模型」的循环表达成**图里的一个环**；
 在此之上逐层叠加出 workflow、chatbot 和带工具的 agent。
 
-**当前进度**：轻框架 → 模型接入 → 多轮对话 → 工具系统 → agent 主循环 → 记忆 → MCP → Skill，
-已完成并可运行。长任务模式在路线图中（见文末）。
+**当前进度**：轻框架 → 模型接入 → 多轮对话 → 工具系统 → agent 主循环 → 记忆 → MCP → Skill
+→ 长任务模式，已完成并可运行。工程化收尾在路线图中（见文末）。
 
 ---
 
@@ -21,6 +21,9 @@
   + 按 token 用量触发的上下文压缩，并且能正确处理"崩溃在工具调用中间"的恢复
 - **MCP 支持**：把跑在独立进程里的工具接进同一套 `Tool` 接口，
   接入点只有一个 `register()`；执行器与主循环完全不需要知道 MCP 的存在
+- **长任务模式**：给一个目标，程序按**可判定的完成判据**（退出码）反复验证，
+  没过就带着失败证据自动重试，直到通过或预算耗尽 ——
+  **"做完了没有"由程序说了算，不是由模型宣布**
 - **协议层正确性**：严格遵循 `assistant(tool_calls)` ↔ `tool(tool_call_id)` 的配对规则，
   支持一次回复中的多个工具调用，且保证消息数量与顺序合法
 - **Skill（渐进式披露）**：操作手册只在**模型主动点名时**才加载，常驻 prompt 的只有一行清单；
@@ -59,7 +62,7 @@ OPENAI_BASE_URL=https://api.deepseek.com/v1
 OPENAI_MODEL_ID=deepseek-chat
 ```
 
-### 五个示例，按难度递增运行
+### 六个示例，按难度递增运行
 
 ```bash
 # ① workflow：三个节点串联，让模型总结一个文件
@@ -76,6 +79,9 @@ python -m examples.chatbot_with_mcp.main
 
 # ⑤ agent + Skill：在 ③ 的基础上，外加一批"按需加载的操作手册"
 python -m examples.chatbot_with_skills.main
+
+# ⑥ 长任务模式：给它一个目标，它自己跑到"程序验证通过"为止
+python -m examples.goal_agent.main goals/demo_wc_tool.md
 ```
 
 离线自检（不消耗 API 额度，随时可以跑）：
@@ -86,6 +92,7 @@ python tools_check.py     # 工具层：8 个工具 + 错误路径 + tool_calls 
 python memory_check.py    # 记忆：字段过滤 / 崩溃恢复 / 压缩边界 / 长期记忆
 python mcp_check.py       # MCP：连接 / 转换 / 注册 / 调用 / 错误路径 / 收尾
 python skill_check.py     # Skill：渐进式加载 / frontmatter 容错 / 幂等 / 接入
+python goal_check.py      # 长任务：加载校验 / 判据执行 / 重试证据 / 预算 / 内环重置
 ```
 
 ---
@@ -303,6 +310,90 @@ description: 按团队规范审查 Python 代码。当用户要求 review、检�
 
 ---
 
+### 长任务模式：把"结束"的决定权从模型手里拿走
+
+前面所有的模块都在做同一件事：**给模型更多能力和信息**。
+而在这之前，"活干完了没有"一直是**模型自己宣布的**：
+
+```python
+tool_calls = saved.get("tool_calls")
+if not tool_calls:
+    return "done"        # ← 模型说完了，程序就信了
+```
+
+问题是模型经常说"我修好了"，而测试还是红的。更根本地说——
+拿模型的判断去验证模型的行为，是**循环论证**。
+
+长任务模式把它反过来：**"结束"的条件从「模型说完了」改成「程序验证通过」。**
+
+```
+                    ┌──────────────────────────────────────┐
+                    │                                      │
+                    ▼                                      │
+       ChatNode ⇄ ToolCallNode      ← 内环：怎么做（Day 5 的代码，一行没改）
+            │
+            └─"done"─▶ VerifyNode ─"retry"─▶ ChatNode      ← 外环：做完了没有
+                           │
+                           ├─"passed" ─┐
+                           └─"give_up"─┴─▶ ReportNode ─▶ 结束
+```
+
+**自主性三要素，缺一个就失控：**
+
+| 要素 | 少了它会怎样 |
+|---|---|
+| 循环（失败就带着原因重来） | 停在第一次失败，需要人盯着 |
+| 判据（程序可判定的完成条件） | 无限打转，永远不知道自己好了没有 |
+| 预算（最多尝试几轮） | 可以烧光 API 额度 |
+
+**任务文件**（frontmatter 格式复用了 Day 8 的解析器，已下沉到 `core/frontmatter.py`）：
+
+```markdown
+---
+goal: 在 tools/builtins/ 下新增一个 wc 工具，注册进 get_builtin_tools()，并保证 tools_check.py 通过。
+check:
+  - python tools_check.py
+  - python -c "from tools.builtins import get_builtin_tools as g; assert 'wc' in {t.name for t in g()}"
+budget: 8
+---
+```
+
+**四条最重要的设计约束：**
+
+1. **判据必须由外部给出，不能由模型自己定。** 让模型定判据等于让运动员自己当裁判 ——
+   它会定一个自己稳过的判据。所以判据写死在任务文件里。
+2. **判据必须是程序可判定的**：只收退出码（`pytest -q`、`python check.py`），
+   不收"代码质量好不好"这种没法判真假的条件。
+3. **重试必须带证据**：命令原文 + 退出码 + 输出尾部。只说"没过，请继续"，
+   模型就会把同一个错误再犯一遍。这也是为什么 Day 4 的 `bash` 要返回**结构化的
+   `exit_code`** 而不是一坨字符串 —— 那个决定到这一步才收网。
+4. **缺 check 的任务文件直接拒绝运行**：没有判据的长任务，等于退回"模型自己说做完了"，
+   那还不如不做。**早失败，比跑偏 12 轮再失败便宜得多。**
+
+**一个诚实的漏洞**：模型有 `bash` 和 `edit`，完全可以去改测试让判据变绿
+（reward hacking，真实 agent 系统里的常见问题）。当前有三道防线：
+提示词里写明禁止改检查 → 判据尽量用外部工具（`pytest` 跑的是你写的测试）→
+跑判据前用 `git status` 挑出"看起来像测试"的改动并**提示给人**。
+最后一道只提供证据、不强制拦截 —— **程序负责提供证据，人负责定夺。**
+
+```
+$ python -m examples.goal_agent.main goals/demo_wc_tool.md
+🎯 XClaw 长任务模式
+目标：在 tools/builtins/ 下新增一个 wc 工具 …
+判据（2 条，退出码 0 表示通过）：…
+
+🤖 助手：…（自己选工具、动手、自测）
+🔍 验证第 1/8 次尝试
+  [✓] python tools_check.py
+  [✓] python -c "…assert 'wc' in names…"
+✅ 目标达成（第 1 次尝试）
+```
+
+每次尝试都会往 `goal_runs/*.jsonl` 追加一行（尝试序号、每条件判据的退出码、耗时），
+用途有三个：调试、放弃时有据可查、以及攒出"平均尝试轮数 / 成功率"这类简历数据。
+
+---
+
 ## 关键设计决策
 
 | 决策 | 为什么这样做 | 代价 / 取舍 |
@@ -327,6 +418,13 @@ description: 按团队规范审查 Python 代码。当用户要求 review、检�
 | frontmatter 只支持 **`key: value` 单行** | 我们的元数据只有 name/description 两个单行字段，手写解析 15 行足够 | 支持不了列表/多行；真需要时换 `yaml.safe_load`（**不是** `yaml.load`，那能构造任意 Python 对象） |
 | 缺 `description` 的手册**直接丢弃** | 没法路由的手册留在索引里只会干扰模型判断 | 少一份手册；换来索引里每一条都是"可用"的 |
 | 记录已加载手册（`loaded` 集合） | 同一份手册读两遍纯属浪费 token | `loaded` 不感知上下文压缩，这是已知缺陷（见"已知限制"） |
+| 任务文件复用 **frontmatter** 格式（Day 9） | 同一份能力被第二个地方需要，就该提取出来 —— 解析器从 `tools/skills/` 下沉到 `core/frontmatter.py` | 多一次重构；换来 `tools/` 和 `core/` 都能用，依赖方向仍是单向的 |
+| 完成判据用**退出码**，不用模型判断 | shell 退出码是沉淀了几十年的"完成判据协议"，`pytest` 已经替你写好了 | 判据必须能被表达成命令；换来判断**客观**、可复现、不烧 token |
+| 判据**不走 `ToolExecutor`** | Executor 是"模型调用的工具"的通道；判据是"程序自己跑的检查"，混在一起模型就有机会干预 | 多一点代码；换来判据和模型之间的隔离 |
+| 判据**全部跑完**，不提前退出 | 目标常是多条件的（功能 + 测试 + 不留脏文件），一次把问题都说清，比挤牙膏高效 | 多花几秒；换来重试更有针对性 |
+| 重试消息里塞**命令原文 + 退出码 + 输出尾部** | 只说"没过，请继续"，模型会把同一个错误再犯一遍 | 消息变长；换来重试有效 |
+| 缺 `check` 就**拒绝运行** | 没有判据的长任务等于退回"模型自己说做完了" —— 那还不如不做 | 少一种"随便跑跑"的用法；换来不会静默退化 |
+| 长任务把进程 cwd **切到 `goal.workdir`** | 8 个工具都按相对路径 + `Path.resolve()` 定位，判据按 `workdir` 跑；两者不一致会出现"判据在 A 找、模型在 B 写" | `chdir` 是进程级全局状态，作为库被调用时不够礼貌（退出时已还原）；更干净的做法是给工具传 cwd |
 
 ---
 
@@ -337,11 +435,15 @@ XClaw/
 ├── core/
 │   ├── node.py              # 图编排：Node / Flow / shared（92 行）
 │   ├── llm.py               # 模型接入：call_llm / call_llm_simple
-│   └── memory.py            # 记忆：对话落盘 + 长期记忆 + 上下文压缩
+│   ├── memory.py            # 记忆：对话落盘 + 长期记忆 + 上下文压缩
+│   ├── frontmatter.py       # 通用 frontmatter 解析（Skill 和 Goal 共用）
+│   └── goal.py              # 长任务：Goal / run_checks / build_retry_message
 ├── skills/                  # 操作手册（YAML frontmatter + 正文）
 │   ├── code-review/SKILL.md
 │   ├── commit-message/SKILL.md
 │   └── debug-python/SKILL.md
+├── goals/
+│   └── demo_wc_tool.md      # 一个真实可跑的长任务（目标 + 判据 + 预算）
 ├── tools/
 │   ├── executor.py          # ToolCall / ToolResult / ToolExecutor
 │   ├── builtins/
@@ -359,12 +461,14 @@ XClaw/
 │   ├── chatbot/             # ② 多轮对话（共享历史）
 │   ├── chatbot_with_tools/  # ③ agent 主循环（图里的环）
 │   ├── chatbot_with_mcp/    # ④ 在本机工具之外再加一组远程工具
-│   └── chatbot_with_skills/ # ⑤ 再加一批按需加载的操作手册
+│   ├── chatbot_with_skills/ # ⑤ 再加一批按需加载的操作手册
+│   └── goal_agent/          # ⑥ 长任务模式（在外层再套一个环）
 ├── day1_check.py            # 图编排验收：线性 / 分支 / 循环
 ├── tools_check.py           # 工具层验收：8 工具 + 错误路径 + tool_calls 解析
 ├── memory_check.py          # 记忆验收：字段过滤 / 崩溃恢复 / 压缩边界 / 长期记忆
 ├── mcp_check.py             # MCP 验收：连接 / 转换 / 注册 / 调用 / 错误路径 / 收尾
 ├── skill_check.py           # Skill 验收：渐进式加载 / 容错 / 幂等 / 接入
+├── goal_check.py            # 长任务验收：加载校验 / 判据 / 重试证据 / 预算 / 内环重置
 ├── requirements.txt
 └── .env.example
 ```
@@ -406,7 +510,7 @@ XClaw/
 - [x] 记忆：对话持久化（重启续聊）+ 长期记忆 + 上下文自动压缩
 - [x] **MCP：把远端工具接入同一套 `Tool` 接口**
 - [x] **Skill：按需加载的操作手册（渐进式加载，降低 prompt 开销）**
-- [ ] 长任务模式：给一个目标，自主多轮执行直到满足完成判据
+- [x] **长任务模式：给一个目标，自主多轮执行直到满足完成判据**
 - [ ] 工程化：打包成命令行工具、引入测试、危险操作确认机制
 
 ---
@@ -424,8 +528,13 @@ XClaw/
   而 `loaded` 还记着"已加载"，模型就再也读不到正文了（`skill_check.py` 末尾留了这个思考题）
 - Skill 的 frontmatter 解析器只支持 `key: value` 单行，放不了列表和多行文本
 - 长任务模式尚未实现：目前一次提问内的工具循环有 `MAX_TOOL_ROUNDS` 上限，但**没有"目标 + 完成判据"**的概念
-- 暂未引入自动化测试框架，目前用五个验收脚本（`day1_check.py` / `tools_check.py` /
-  `memory_check.py` / `mcp_check.py` / `skill_check.py`）保证核心行为
+- **长任务模式的判据挡不住"奖励作弊"**：模型有 `bash` / `edit`，可以去改测试让判据变绿。
+  目前只做到"用 `git status` 指出可疑改动并提示给人"，没有强制拦截
+- 长任务的判据由 `shell=True` 执行，和 `bash` 工具是同样的信任假设：**判据命令必须可信**
+- `run_goal` 用 `os.chdir()` 切换工作目录（退出时还原），是进程级全局状态，
+  作为库被别的程序调用时不够礼貌
+- 暂未引入自动化测试框架，目前用六个验收脚本（`day1_check.py` / `tools_check.py` /
+  `memory_check.py` / `mcp_check.py` / `skill_check.py` / `goal_check.py`）保证核心行为
 
 ---
 
