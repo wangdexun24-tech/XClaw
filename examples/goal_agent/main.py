@@ -36,6 +36,7 @@ from typing import Any, Tuple
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from core.approval import ApprovalNode, AutoApprover           # noqa: E402
 from core.goal import (                                        # noqa: E402
     GoalError,
     build_retry_message,
@@ -148,10 +149,11 @@ class ReportNode(Node):
 
 def build_flow() -> Flow:
     """连图（只做一次）。注意内环的两条边和 Day 5 完全一样。"""
-    chat, tool_call = ChatNode(), ToolCallNode()
+    chat, approval, tool_call = ChatNode(), ApprovalNode(), ToolCallNode()
     verify, report = VerifyNode(), ReportNode()
 
-    chat - "tool_call" >> tool_call
+    chat - "tool_call" >> approval
+    approval - "proceed" >> tool_call
     tool_call - "chat" >> chat        # ← 内环闭合（Day 5 原样）
     chat - "done" >> verify           # ← 新增：一轮结束 → 去验证
     verify - "retry" >> chat          # ← 新增：没通过 → 再来一轮（外环闭合）
@@ -189,6 +191,13 @@ def run_goal(
     shared["tool_executor"] = executor
     shared["tools"] = executor.get_llm_tools()
     shared["memory"] = Memory(Path(memory_dir or PROJECT_ROOT / "goal_memory"))
+
+    # 长任务是无人值守的：没人能回答终端里的 [y/N]。
+    # 如果这里用 ConsoleApprover，程序会**卡在 input() 上**，看起来像死循环。
+    # 所以这里显式声明信任策略为"自动放行"。
+    # —— 反过来说，这也说明长任务模式的判据必须足以兜住"模型乱改文件"的风险。
+    shared["approver"] = AutoApprover()
+
     shared["goal"] = goal
     shared["attempt"] = 0
     shared["tool_round"] = 0

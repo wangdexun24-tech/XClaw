@@ -113,6 +113,11 @@ class ToolExecutor:
         """按顺序执行多条调用（模型可能一次给好几个）。"""
         return [self.execute(call) for call in calls]
 
+    def needs_approval(self, name: str) -> bool:
+        """这个工具执行前要不要问用户？**未知工具一律返回 True**（fail-safe）。"""
+        tool = self.tool_map.get(name)
+        return True if tool is None else tool.requires_approval
+
 
 def _stringify(value: Any) -> str:
     """统一转成字符串：dict/list 走 JSON，其他直接 str。"""

@@ -180,4 +180,7 @@ def build_skill_tool(loader: SkillLoader, loaded: set[str] | None = None) -> Too
             "required": ["name"],
         },
         fn=load_skill,
+        # 加载手册只是读本地文件、返回文本，没有任何副作用 —— 不必打扰用户。
+        # （Day 10 加的 requires_approval 默认是 True，这里显式放宽。）
+        requires_approval=False,
     )

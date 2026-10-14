@@ -17,10 +17,11 @@ from typing import Any, Tuple
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from core.memory import Memory
+from core.approval import ApprovalNode, ConsoleApprover   # noqa: E402
+from core.memory import Memory             # noqa: E402
 from core.llm import call_llm              # noqa: E402
 from core.node import Flow, Node, shared   # noqa: E402
-from tools import ToolExecutor             # noqa: E402
+from tools import ToolExecutor, ToolResult  # noqa: E402
 from tools.builtins import Tool            # noqa: E402
 
 MAX_TOOL_ROUNDS = 8          # 一轮提问里，最多允许"模型↔工具"循环几次
@@ -80,27 +81,36 @@ class ToolCallNode(Node):
         assistant_message = payload
         memory: Memory = shared["memory"]
         executor: ToolExecutor = shared["tool_executor"]
+        denied: dict[str, str] = shared.get("denied") or {}
 
         tool_calls = executor.parse_tool_calls(assistant_message)
-        results = executor.execute_all(tool_calls)
 
-        for call, result in zip(tool_calls, results):
+        # 逐条处理：被拒绝的**也要**产生一条 tool 消息，否则配对就断了
+        for call in tool_calls:
+            if call.id in denied:
+                result = ToolResult(
+                    tool_call_id=call.id,
+                    content=denied[call.id],
+                    is_error=True,
+                )
+            else:
+                result = executor.execute(call)
+
             preview = result.content[:TOOL_PREVIEW].replace("\n", " ")
             mark = "✗" if result.is_error else "✓"
             print(f"  [工具 {mark}] {call.name}({call.arguments})")
             print(f"           → {preview}")
 
-            # 每条 tool_call 对应一条 tool 消息，靠 tool_call_id 配对
-            memory.append(result.to_message())          # ← 落盘
+            memory.append(result.to_message())
 
-        return "chat", None        # ← 回到 ChatNode，这就是"环"
+        return "chat", None
 
 def build_flow() -> Flow:
-    """构建图（只做一次）。"""
-    chat, tool_call = ChatNode(), ToolCallNode()
+    chat, approval, tool_call = ChatNode(), ApprovalNode(), ToolCallNode()
 
-    chat - "tool_call" >> tool_call     # 有工具要执行 → 去执行
-    tool_call - "chat" >> chat          # 执行完 → 回到模型 ← 环在这里闭合
+    chat - "tool_call" >> approval       # ← 原来直接连 tool_call
+    approval - "proceed" >> tool_call
+    tool_call - "chat" >> chat           # 内环闭合，没变
 
     return Flow(chat)
 
@@ -110,6 +120,10 @@ def run_chat(extra_tools: list[Tool] | None = None) -> None:
 
     extra_tools：额外注册的工具（Day 7 的 MCP 远程工具就从这个口子进来）。
     —— 注意主循环（ChatNode / ToolCallNode / build_flow）这三块**一行都没改**。
+
+    ⚠️ Day 10 之后，agent 会向用户确认危险操作。**必须显式配置确认器**：
+    没配置时所有需要确认的工具都会被拒绝（fail-safe）。
+    无人值守的场景请改用 AutoApprover()。
     """
     print("=" * 60)
     print("🤖 XClaw Agent（带工具的对话）")
@@ -124,6 +138,10 @@ def run_chat(extra_tools: list[Tool] | None = None) -> None:
         print(f"[外部工具] 已注册 {len(names)} 个：{', '.join(names)}")
     shared["tool_executor"] = executor
     shared["tools"] = executor.get_llm_tools()      # 所有工具的协议描述
+
+    # Day 10：谁来决定"这个操作能不能执行"。
+    # 这里是人机交互，所以用终端确认器；不配置的话一切需要确认的工具都会被拒绝。
+    shared["approver"] = ConsoleApprover()
 
     # 记忆：会自动读回上次的对话
     memory = Memory(PROJECT_ROOT / "chat_memory")

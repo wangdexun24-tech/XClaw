@@ -30,7 +30,9 @@ def main() -> None:
 
     # 用 sys.executable 而不是写死 "python"：保证子进程和当前虚拟环境是同一个解释器
     with MCPClient(command=sys.executable, args=[str(server)], name="xclaw-tools") as client:
-        remote_tools = to_local_tools(client)
+        # requires_approval=False：这是我们自己写的本地 demo server，工具都是只读的。
+        # 接**第三方** MCP 服务器时请保持默认（True）—— 那里的代码不是我们控制的。
+        remote_tools = to_local_tools(client, requires_approval=False)
         print(f"[mcp] 已连接 MCP 服务器，拿到 {len(remote_tools)} 个远程工具："
               f"{', '.join(client.tool_names())}")
         # 远程工具从 extra_tools 这个口子进去，和 8 个本地工具平起平坐

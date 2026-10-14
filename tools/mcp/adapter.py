@@ -31,16 +31,33 @@ from tools.builtins.tool_def import Tool
 from .client import MCPClient
 
 
-def to_local_tools(client: MCPClient, prefix: str = "") -> list[Tool]:
+def to_local_tools(
+    client: MCPClient,
+    prefix: str = "",
+    requires_approval: bool = True,
+) -> list[Tool]:
     """把一条 MCP 连接上的所有远程工具，包装成本地 Tool 列表。
 
     prefix 用来避免和本地工具重名（例如 prefix="mcp_" → "mcp_calc"）。
     默认不加前缀：先让模型看到干净的名字，重名时再处理。
+
+    requires_approval：Day 10 加的开关，**默认 True**。
+    为什么不默认放行 —— MCP 工具是**别人写的、跑在别的进程里**的代码，
+    我们既不知道它有没有副作用，也控制不了它做什么。
+    信任策略应该由调用方显式声明，而不是由适配器替它猜。
     """
-    return [_to_local_tool(client, raw, prefix) for raw in client.list_tools()]
+    return [
+        _to_local_tool(client, raw, prefix, requires_approval)
+        for raw in client.list_tools()
+    ]
 
 
-def _to_local_tool(client: MCPClient, raw: Any, prefix: str) -> Tool:
+def _to_local_tool(
+    client: MCPClient,
+    raw: Any,
+    prefix: str,
+    requires_approval: bool,
+) -> Tool:
     remote_name = getattr(raw, "name", "")
     description = (getattr(raw, "description", None) or "").strip()
     return Tool(
@@ -48,6 +65,7 @@ def _to_local_tool(client: MCPClient, raw: Any, prefix: str) -> Tool:
         description=description or f"远程工具 {remote_name}",
         parameters=_clean_schema(getattr(raw, "input_schema", None)),
         fn=_make_fn(client, remote_name),
+        requires_approval=requires_approval,
     )
 
 

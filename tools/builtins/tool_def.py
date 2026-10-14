@@ -1,10 +1,13 @@
 """工具的定义：把"一个普通函数"包装成"模型能调用的工具"。
 
-一个工具需要四样东西：
-    name        工具名（模型用它来调用）
-    description 给模型看的说明（决定它会不会正确使用）
-    parameters  JSON Schema 格式的参数描述
-    fn          真正干活的函数
+一个工具需要五样东西：
+    name              工具名（模型用它来调用）
+    description       给模型看的说明（决定它会不会正确使用）
+    parameters        JSON Schema 格式的参数描述
+    fn                真正干活的函数
+    requires_approval 执行前要不要问用户（Day 10 加）
+                      **默认 True** —— 忘了声明的后果必须是"多问一句"，
+                      不能是"默默放行"。纯读工具显式传 False。
 """
 
 from __future__ import annotations
@@ -12,11 +15,19 @@ from __future__ import annotations
 from typing import Any, Callable, List
 
 class Tool:
-    def __init__(self, name: str, description: str, parameters: dict, fn: Callable):
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        parameters: dict,
+        fn: Callable,
+        requires_approval: bool = True,     # ← 默认「需要确认」
+    ):
         self.name = name
         self.description = description
         self.parameters = parameters
         self.fn = fn
+        self.requires_approval = requires_approval
 
     def to_llm_format(self) -> dict:
         """转成 LLM API 要求的格式（OpenAI / Anthropic 通用）。"""
@@ -54,6 +65,7 @@ def get_builtin_tools() -> List[Tool]:
                 "required": ["path"],
             },
             fn=read_file,
+            requires_approval=False,
         ),
         Tool(
             name="write",
@@ -116,6 +128,7 @@ def get_builtin_tools() -> List[Tool]:
                 },
             },
             fn=ls,
+            requires_approval=False,
         ),
         Tool(
             name="grep",
@@ -137,6 +150,7 @@ def get_builtin_tools() -> List[Tool]:
                 "required": ["pattern"],
             },
             fn=grep,
+            requires_approval=False,
         ),
         Tool(
             name="find",
@@ -154,6 +168,7 @@ def get_builtin_tools() -> List[Tool]:
                 "required": ["pattern"],
             },
             fn=find,
+            requires_approval=False,
         ),
         Tool(
             name="search",
