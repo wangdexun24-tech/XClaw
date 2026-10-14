@@ -60,17 +60,32 @@ def demo_linear() -> None:
     print("\n=== ① 线性：Double -> Add(3) -> Print ===")
     double, add, show = DoubleNode(), AddNode(3), PrintNode()
     double >> add >> show           # 链式连接
-    Flow(double).run(5)
+    action, payload = Flow(double).run(5)
+    assert (action, payload) == ("done", 13), (action, payload)
 
 
 def demo_branch() -> None:
     print("\n=== ② 分支：Branch 按数值选路 ===")
-    branch, big, small = BranchNode(), PrintNode(), PrintNode()
+    seen: list[str] = []
+
+    class TagNode(PrintNode):
+        """带标记的终点，用来断言"到底走了哪条边"。"""
+
+        def __init__(self, tag: str, **kwargs):
+            super().__init__(**kwargs)
+            self.tag = tag
+
+        def exec(self, payload):
+            seen.append(self.tag)
+            return super().exec(payload)
+
+    branch, big, small = BranchNode(), TagNode("big"), TagNode("small")
     branch - "big" >> big
     branch - "small" >> small
 
     Flow(branch).run(12)
     Flow(branch).run(3)
+    assert seen == ["big", "small"], f"分支走错了：{seen}"
 
 
 def demo_loop() -> None:
@@ -78,7 +93,8 @@ def demo_loop() -> None:
     count, finish = CountNode(), PrintNode()
     count - "continue" >> count      # 环回自己
     count - "stop" >> finish
-    Flow(count).run(0)
+    action, payload = Flow(count).run(0)
+    assert (action, payload) == ("done", 3), (action, payload)
 
 
 if __name__ == "__main__":

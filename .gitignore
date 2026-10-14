@@ -7,3 +7,6 @@ __pycache__/
 chat_memory/
 goal_memory/
 goal_runs/
+.xclaw/
+.pytest_cache/
+*.egg-info/

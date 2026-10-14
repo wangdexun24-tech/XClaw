@@ -116,10 +116,16 @@ def build_flow() -> Flow:
     return Flow(chat)
 
 
-def run_chat(extra_tools: list[Tool] | None = None) -> None:
+def run_chat(
+    extra_tools: list[Tool] | None = None,
+    memory_dir: Path | str | None = None,
+) -> None:
     """启动对话。
 
     extra_tools：额外注册的工具（Day 7 的 MCP 远程工具就从这个口子进来）。
+    memory_dir：会话数据存哪。
+        - 直接跑示例时不传 → 存在本仓库的 chat_memory/
+        - 经 xclaw 命令跑时传当前目录 → 每个项目一份独立历史（会话按工作区隔离）
     —— 注意主循环（ChatNode / ToolCallNode / build_flow）这三块**一行都没改**。
 
     ⚠️ Day 10 之后，agent 会向用户确认危险操作。**必须显式配置确认器**：
@@ -151,7 +157,7 @@ def run_chat(extra_tools: list[Tool] | None = None) -> None:
     shared["approver"] = ConsoleApprover()
 
     # 记忆：会自动读回上次的对话
-    memory = Memory(PROJECT_ROOT / "chat_memory")
+    memory = Memory(Path(memory_dir) if memory_dir else PROJECT_ROOT / "chat_memory")
     shared["memory"] = memory
     if memory.messages:
         print(f"[memory] 已恢复上次对话：{len(memory.messages)} 条消息")

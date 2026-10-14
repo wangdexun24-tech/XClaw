@@ -37,6 +37,8 @@
 - **渐进式示例**：`workflow → chatbot → chatbot_with_tools → chatbot_with_mcp → chatbot_with_skills`，
   每层只引入一个新概念，**每个都能独立运行**
 - **可离线验证**：工具层、记忆、MCP 都能脱离真实模型测试（脚本化假模型 + 断言），验证时不消耗 API 额度
+- **可安装、可回归**：`pip install -e .` 后得到 `xclaw` 命令；
+  `pytest` 一键跑 **49 个用例（约 3 秒）**，全部不调用真实模型
 
 ---
 
@@ -55,10 +57,45 @@ cd XClaw
 
 python3 -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
+pip install -e .                   # 以可编辑模式安装，顺便得到 xclaw 命令
+# 或者：pip install -r requirements.txt   （只要依赖，不要命令）
 
 cp .env.example .env               # 然后填入下面的配置
 ```
+
+**跑测试**（不花 API 额度）：
+
+```bash
+pip install -e ".[dev]"     # 含 pytest
+pytest                      # 49 个用例，约 3 秒
+```
+
+---
+
+### 作为一个命令使用
+
+装好之后，`xclaw` 可以在**任意目录**里运行 —— 它的工作区就是当前目录：
+
+```bash
+cd 你想让 agent 干活的项目
+xclaw                       # 进入交互式 agent
+```
+
+```
+$ xclaw --help
+usage: xclaw [-h] {chat,goal,check,tools} ...
+
+  chat    交互式 agent（默认命令）
+  goal    跑一个长任务（目标 + 可判定判据 + 预算）
+  check   跑离线验收脚本（不花 API 额度）
+  tools   列出工具及其确认策略
+
+$ xclaw check approval     # 只跑某一项验收
+$ xclaw check all          # 八项全跑
+$ xclaw tools              # 看看每个工具要不要确认
+```
+
+会话数据存在工作区的 `.xclaw/` 下（**按工作区隔离**：A 项目的历史不会串到 B 项目）。
 
 `.env` 配置（`.env.example` 里有模板）：
 
@@ -641,6 +678,19 @@ XClaw/
 │   ├── chatbot_with_mcp/    # ④ 在本机工具之外再加一组远程工具
 │   ├── chatbot_with_skills/ # ⑤ 再加一批按需加载的操作手册
 │   └── goal_agent/          # ⑥ 长任务模式（在外层再套一个环）
+├── tests/                   # pytest 用例（49 个，约 3 秒，不调用真实模型）
+│   ├── conftest.py          # 公共夹具：工作区隔离 + 回到仓库根目录
+│   ├── test_graph.py        # Day 1  图编排（含死循环保护等边界）
+│   ├── test_tools.py        # Day 4/10/11  工具层与确认策略
+│   ├── test_memory.py       # Day 6/11  记忆、归档、自愈
+│   ├── test_mcp.py          # Day 7  MCP
+│   ├── test_skills.py       # Day 8  Skill 渐进式加载
+│   ├── test_goal.py         # Day 9  长任务
+│   ├── test_approval.py     # Day 10 操作确认
+│   ├── test_hardening.py    # Day 11 工程化加固
+│   └── test_protocol.py     # 跨模块不变量（按"约束"组织，不是按天）
+├── pyproject.toml           # 打包配置 + [project.scripts] xclaw
+├── xclaw_cli.py             # 命令行入口：chat / goal / check / tools
 ├── day1_check.py            # 图编排验收：线性 / 分支 / 循环
 ├── tools_check.py           # 工具层验收：8 工具 + 错误路径 + tool_calls 解析
 ├── memory_check.py          # 记忆验收：字段过滤 / 崩溃恢复 / 压缩边界 / 长期记忆
@@ -652,6 +702,17 @@ XClaw/
 ├── requirements.txt
 └── .env.example
 ```
+
+**验收脚本和 pytest 是什么关系？**
+
+两者共用同一份验证逻辑，只是入口不同：
+
+- 直接 `python approval_check.py` → 打印带 ✓ 的可读报告，适合**看过程**
+- `xclaw check approval` → 同上，且可以在任意目录跑
+- `pytest` → 收编成用例，适合**看结果**、接 CI
+
+脚本里会改全局状态（阈值、假模型、工作区），所以 `xclaw check` 让**每个脚本单独起进程**，
+避免互相污染。
 
 **工具清单**（8 个）：
 
@@ -677,6 +738,8 @@ XClaw/
 - **外部工具**：MCP（`mcp` 官方客户端 + `fastmcp` 服务器端）
 - **知识注入**：自研 Skill 加载器（YAML frontmatter + 渐进式披露，无第三方依赖）
 - **操作确认**：自研 `ApprovalNode` + `Protocol` 确认器（终端 / 自动两种实现，无第三方依赖）
+- **测试**：pytest（49 个用例）；另保留 8 个可独立运行的验收脚本，两种入口共用同一份验证逻辑
+- **打包**：`pyproject.toml` + `[project.scripts]`，`pip install -e .` 后得到 `xclaw` 命令
 - **依赖**：`openai`、`python-dotenv`、`ddgs`、`mcp`、`fastmcp`（只有这五个）
 
 ---
@@ -694,7 +757,7 @@ XClaw/
 - [x] **长任务模式：给一个目标，自主多轮执行直到满足完成判据**
 - [x] **危险操作确认机制（写/改/执行/联网前询问，默认拒绝，危险命令高亮）**
 - [x] **工程化加固：工作区边界 / 原子写 / 压缩前归档 / 中断恢复 / 差异预览**
-- [ ] 工程化收尾：打包成命令行工具、把验收脚本改造成 pytest
+- [x] **工程化收尾：打包成 `xclaw` 命令 + 把验收脚本改造成 pytest（49 个用例）**
 
 ---
 
@@ -727,9 +790,12 @@ XClaw/
   和 `shared` 一样是教学取舍；生产里应由调用方显式传入
 - **`drop_incomplete_round()` 偏保守**：历史停在 tool 结果上时也会被清掉。
   宁可多删一轮，也不发出会被 API 拒绝的历史 —— 代价是可能丢掉一个合法的尾部
-- 暂未引入自动化测试框架，目前用八个验收脚本（`day1_check.py` / `tools_check.py` /
-  `memory_check.py` / `mcp_check.py` / `skill_check.py` / `goal_check.py` /
-  `approval_check.py` / `hardening_check.py`）保证核心行为
+- **包名是顶层通用名**（`core` / `tools` / `examples`），装进环境后会占这三个名字。
+  正式发布前应该改成 `src/xclaw/` 布局；现在没这么做是为了保持"代码在哪个文件一眼可见"的教学可读性
+- **测试以离线为主**：`pytest` 全部跑假模型，验证的是**控制逻辑**，不是"模型答得好不好"。
+  提示词质量、检索效果这类东西，离线测试证明不了
+- 八个验收脚本和 pytest 共用同一份验证逻辑（脚本里带断言，测试只是把它们收编）。
+  好处是一处维护，代价是测试文件的"信息密度"看起来不如手写用例高
 
 ---
 

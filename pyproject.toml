@@ -1,0 +1,35 @@
+[project]
+name = "xclaw"
+version = "0.1.0"
+description = "从零手写的编程智能体（coding agent）：自研图编排 + 统一工具契约，不依赖 LangChain / LangGraph"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=2.0.0",
+    "python-dotenv>=1.0.0",
+    "ddgs>=9.0.0",
+    "mcp>=1.0.0",
+    "fastmcp>=3.0.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+xclaw = "xclaw_cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+# xclaw_cli 是仓库根目录下的单个模块，不写成 py-modules 就不会被打包
+py-modules = ["xclaw_cli"]
+
+[tool.setuptools.packages.find]
+include = ["core*", "tools*", "examples*"]
+namespaces = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

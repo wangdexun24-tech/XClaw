@@ -3,17 +3,40 @@
 两个函数，对应两种使用场景：
     call_llm_simple(prompt) -> str                      纯文本生成（不需要工具）
     call_llm(messages, tools, system_prompt) -> dict    完整对话（返回原始 message）
+
+## 配置从哪来（Day 12 收尾时补的）
+装成 `xclaw` 命令之后，它可能被**在任意目录**调用。
+所以配置要分两级：
+    1. 当前目录（或向上找到）的 .env   ← 项目级，优先
+    2. ~/.xclaw/.env                  ← 用户级，兜底
+`load_dotenv()` 默认不覆盖已有的环境变量，所以**先加载的赢** ——
+先读项目、再读用户级，就得到"项目配置优先、用户配置兜底"。
 """
 
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
 from openai import OpenAI
 
-load_dotenv()                    # 自动读项目根目录的 .env
+# 用户级配置目录：把 key 放这儿，就能在任何目录使用 xclaw
+USER_CONFIG_DIR = Path.home() / ".xclaw"
+USER_CONFIG_FILE = USER_CONFIG_DIR / ".env"
+
+
+def _load_env() -> None:
+    """两级配置加载：先项目（优先），后用户级（兜底）。
+
+    顺序不能反：load_dotenv 默认 override=False，**先加载的赢**。
+    """
+    load_dotenv()                       # 1. 当前目录 / 向上查找的 .env
+    load_dotenv(USER_CONFIG_FILE)       # 2. 兜底；文件不存在时静默跳过
+
+
+_load_env()
 
 _client: OpenAI | None = None
 
@@ -23,7 +46,11 @@ def _get_client() -> OpenAI:
     if _client is None:
         api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
-            raise RuntimeError("缺少 OPENAI_API_KEY，请在项目根目录的 .env 里配置")
+            raise RuntimeError(
+                "缺少 OPENAI_API_KEY。两种放法任选其一：\n"
+                f"  1. 当前目录（或向上找到）的 .env            ← 项目级，优先\n"
+                f"  2. {USER_CONFIG_FILE}   ← 用户级，兜底（放这儿就能在任意目录用 xclaw）"
+            )
         _client = OpenAI(
             api_key=api_key,
             base_url=os.environ.get("OPENAI_BASE_URL"),
