@@ -52,7 +52,19 @@ def scan_command(command: str) -> list[str]:
 class Approver(Protocol):
     """确认器的接口。返回 True 表示允许执行。"""
 
-    def confirm(self, tool_name: str, arguments: dict, notes: list[str]) -> bool:
+    def confirm(
+        self,
+        tool_name: str,
+        arguments: dict,
+        notes: list[str],
+        preview: str | None = None,
+    ) -> bool:
+        """preview 是"执行前的预览"（Day 11 加的，比如 edit 的 diff）。
+
+        为什么不把它硬塞进 notes：notes 是"提醒"，preview 是"要执行的内容本身"，
+        两者给人看的方式不一样（preview 要按行的格式显示）。分开更好排版，
+        也更容易在测试里单独断言。
+        """
         ...
 
 class ConsoleApprover:
@@ -67,11 +79,23 @@ class ConsoleApprover:
         self._input = input_fn
         self._print = print_fn
 
-    def confirm(self, tool_name: str, arguments: dict, notes: list[str]) -> bool:
+    def confirm(
+        self,
+        tool_name: str,
+        arguments: dict,
+        notes: list[str],
+        preview: str | None = None,
+    ) -> bool:
         self._print("\n" + "─" * 60)
         self._print(f"[需要确认] {tool_name}")
         self._print("完整参数（不截断 —— 人要据此做决定）：")
         self._print(json.dumps(arguments, ensure_ascii=False, indent=2))
+
+        if preview:
+            # 预览放在参数之后：先看"要干什么"，再看"具体改成什么样"
+            self._print("\n[修改预览] - 表示删除，+ 表示新增（只预览被替换的片段）：")
+            self._print(preview)
+
         for note in notes:
             self._print(f"  ⚠️ {note}")
         self._print("─" * 60)
@@ -94,7 +118,13 @@ class AutoApprover:
         self.allow = allow
         self.calls: list[tuple[str, dict]] = []
 
-    def confirm(self, tool_name: str, arguments: dict, notes: list[str]) -> bool:
+    def confirm(
+        self,
+        tool_name: str,
+        arguments: dict,
+        notes: list[str],
+        preview: str | None = None,
+    ) -> bool:
         self.calls.append((tool_name, arguments))
         return self.allow
 
@@ -126,8 +156,10 @@ class ApprovalNode(Node):
             # 有 command 参数的工具扫一遍危险模式（对 bash 和未来任何带 command 的工具都生效）
             command = call.arguments.get("command")
             notes = scan_command(str(command)) if command else []
+            # 预览由**工具**提供（edit 给 diff，其它工具默认没有）
+            preview = executor.preview_for(call.name, call.arguments)
 
-            if not approver.confirm(call.name, call.arguments, notes):
+            if not approver.confirm(call.name, call.arguments, notes, preview=preview):
                 denied[call.id] = DENIED_TEMPLATE
 
         shared["denied"] = denied

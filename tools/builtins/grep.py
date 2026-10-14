@@ -6,6 +6,8 @@ import os
 import re
 from pathlib import Path
 
+from core.workspace import ensure_inside
+
 DEFAULT_LIMIT = 100
 MAX_BYTES = 30 * 1024
 MAX_LINE_CHARS = 500
@@ -29,7 +31,7 @@ def grep(
 
     literal=True 时把 pattern 当普通文本（不当正则）。
     """
-    target = Path(path).resolve()
+    target = ensure_inside(path)
     if not target.exists():
         raise FileNotFoundError(f"路径不存在：{path}")
 

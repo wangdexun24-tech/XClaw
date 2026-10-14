@@ -48,6 +48,7 @@ from core.goal import (                                        # noqa: E402
 )
 from core.memory import Memory                                 # noqa: E402
 from core.node import Flow, Node, shared                       # noqa: E402
+from core.workspace import set_workspace                       # noqa: E402
 from examples.chatbot_with_tools.main import ChatNode, ToolCallNode  # noqa: E402
 from tools import ToolExecutor                                 # noqa: E402
 
@@ -212,6 +213,9 @@ def run_goal(
     # 两者不一致的话，会遇到"判据在 A 目录找文件、模型在 B 目录写文件"这种鬼故事。
     # 代价说清楚：chdir 是**进程级全局状态**，作为库被别的程序调用时不够礼貌；
     # 更干净的做法是给每个工具传入 cwd —— 那是后面可以做的重构。
+    # 文件工具的工作区就是这条长任务的工作目录
+    set_workspace(goal.workdir)
+
     original_cwd = Path.cwd()
     os.chdir(goal.workdir)
     try:

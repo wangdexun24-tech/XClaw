@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from core.workspace import ensure_inside
+
 DEFAULT_LIMIT = 200
 MAX_BYTES = 30 * 1024
 
@@ -16,7 +18,7 @@ def find(pattern: str, path: str = ".", limit: int = DEFAULT_LIMIT) -> str:
 
     只返回**文件**（不返回目录），路径相对搜索起点。
     """
-    root = Path(path).resolve()
+    root = ensure_inside(path)
 
     if not root.exists():
         raise FileNotFoundError(f"路径不存在：{path}")

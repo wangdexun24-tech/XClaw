@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,40 @@ MESSAGE_KEYS = {"role", "content", "tool_calls", "tool_call_id", "reasoning_cont
 MAX_CONTEXT_TOKENS = 128_000      # 模型上下文窗口（按你实际用的模型调整）
 COMPRESS_THRESHOLD = 0.9          # 用到 90% 才压缩——摘要会丢细节，别压太早
 KEEP_RECENT_MESSAGES = 6          # 压缩后保留最近几条原文
+
+
+def drop_incomplete_round(messages: list[dict[str, Any]]) -> bool:
+    """丢掉最后一轮"没走完"的对话。返回是否改动过。
+
+    什么算没走完：最后一条带 tool_calls 的 assistant 消息后面，
+    没有跟齐配对的 tool 结果。这种历史直接发给 API 会被拒绝。
+
+    为什么提成模块级函数：Day 6 只在"读回文件"时用了一次；
+    Day 11 加了 Ctrl+C 处理，**内存里也要用同一套逻辑**。
+    同一份规则被第二处需要，就该提取出来 —— 复制粘贴两份迟早会改歪一份。
+
+    ⚠️ 判据是"尾部里**只要出现非 tool 消息**就算这一轮走完了"，
+    而不是"tool 数量对不对"。这是从 Day 6 原样搬过来的行为：
+    结尾停在 tool 结果上时也会被清掉 —— 偏保守（宁可多删一轮，
+    也不要发出被 API 拒绝的历史），代价是可能丢掉一个合法的尾部。
+    改它之前要先确认服务端接不接受"以 tool 消息结尾"的历史。
+    """
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if message.get("role") != "assistant" or not message.get("tool_calls"):
+            continue
+
+        tail = messages[index + 1:]
+        # 尾部里出现了非 tool 消息 → 说明这轮有"收尾的助手回复"，是完整的
+        if tail and not all(item.get("role") == "tool" for item in tail):
+            return False                     # 这一轮是完整的，什么都不用做
+
+        # 不完整：连它的 user 提问一起去掉（半截的问答留着只会误导模型）
+        start = index - 1 if index > 0 and messages[index - 1].get("role") == "user" else index
+        del messages[start:]
+        return True
+
+    return False
 
 class Memory:
     """一份对话记录（jsonl）+ 一个长期记忆文件（md）。"""
@@ -66,22 +101,7 @@ class Memory:
         # 如果文件最后停在一个"有 tool_calls 但没有对应 tool 结果"的助手上，
         # 说明上次是中途退出的。这一轮必须丢掉——否则下次请求会因为
         # tool_calls 和 tool 结果配对不完整，被 API 直接拒绝。
-        need_rewrite = False
-        for index in range(len(messages) - 1, -1, -1):
-            message = messages[index]
-            if message.get("role") != "assistant" or not message.get("tool_calls"):
-                continue
-
-            tail = messages[index + 1:]
-            if tail and not all(item.get("role") == "tool" for item in tail):
-                break                          # 这一轮是完整的，不用动
-
-            start = index - 1 if index > 0 and messages[index - 1].get("role") == "user" else index
-            del messages[start:]               # 连它的 user 提问一起丢掉
-            need_rewrite = True
-            break
-
-        if need_rewrite:
+        if drop_incomplete_round(messages):
             self._rewrite_session(messages)
 
         return messages
@@ -104,6 +124,34 @@ class Memory:
         """清空**对话**记忆（长期记忆不动）。"""
         self.messages = []
         self._rewrite_session([])
+
+    def repair(self) -> bool:
+        """把**内存里**的历史恢复到合法状态（丢掉没走完的一轮）。
+
+        用在被 Ctrl+C 打断之后：那时历史里可能留着一条带 tool_calls 的
+        assistant 消息，却没有对应的 tool 结果 —— 下一次请求会被 API 直接拒绝。
+        修完立刻落盘，避免重启后又带着残history。
+        """
+        if drop_incomplete_round(self.messages):
+            self._rewrite_session(self.messages)
+            return True
+        return False
+
+    def _archive(self, messages: list[dict[str, Any]], reason: str = "compress") -> Path:
+        """把即将被改写的原始记录单独存一份。
+
+        压缩是**有损**的：摘要会丢细节。归档保证"原始对话还在"，出问题能回查。
+        文件名带时间戳 → 多次压缩不会互相覆盖；用 jsonl → 坏一行只坏一行。
+        """
+        directory = self.dir / "archive"
+        directory.mkdir(parents=True, exist_ok=True)
+
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        path = directory / f"{stamp}-{reason}.jsonl"
+        with path.open("w", encoding="utf-8") as handle:
+            for message in messages:
+                handle.write(json.dumps(message, ensure_ascii=False) + "\n")
+        return path
 
     def read_long_term(self) -> str:
         """读长期记忆的正文（去掉标题）。"""
@@ -154,6 +202,15 @@ class Memory:
             print("[memory] 摘要没有比原文更短，跳过压缩")
             return False                       # 压缩必须有净收益
 
+        # ⚠️ 顺序很重要：**先生成摘要 → 确认更短 → 归档 → 最后才替换**。
+        # 任何一步失败都保留原状，绝不能出现"历史没了、摘要也没有"的空档。
+        try:
+            archive_path = self._archive(self.messages)
+        except OSError as exc:
+            # 归档失败就放弃压缩：宁可多占些上下文，也不能丢掉原始记录
+            print(f"[memory] 归档失败，本次不压缩：{exc}")
+            return False
+
         before = len(self.messages)
         self.messages = [
             {"role": "user", "content": f"[对话历史摘要]\n{summary}"},
@@ -161,6 +218,7 @@ class Memory:
         ]
         self._rewrite_session(self.messages)
         print(f"[memory] 已压缩：{before} 条 → {len(self.messages)} 条")
+        print(f"[memory] 压缩前的原始记录已归档：{archive_path}")
         return True
 
     def _summarize(self, messages: list[dict[str, Any]]) -> str:

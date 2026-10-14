@@ -21,6 +21,7 @@ from core.approval import ApprovalNode, ConsoleApprover   # noqa: E402
 from core.memory import Memory             # noqa: E402
 from core.llm import call_llm              # noqa: E402
 from core.node import Flow, Node, shared   # noqa: E402
+from core.workspace import get_root, set_workspace   # noqa: E402
 from tools import ToolExecutor, ToolResult  # noqa: E402
 from tools.builtins import Tool            # noqa: E402
 
@@ -139,6 +140,12 @@ def run_chat(extra_tools: list[Tool] | None = None) -> None:
     shared["tool_executor"] = executor
     shared["tools"] = executor.get_llm_tools()      # 所有工具的协议描述
 
+    # Day 11：文件工具只允许碰工作区里的路径。
+    # 默认就是启动时的目录，这里显式写出来，是为了让它"看得见"，
+    # 而不是藏在一个模块级默认值里。
+    set_workspace(Path.cwd())
+    print(f"[workspace] 文件工具的工作区：{get_root()}")
+
     # Day 10：谁来决定"这个操作能不能执行"。
     # 这里是人机交互，所以用终端确认器；不配置的话一切需要确认的工具都会被拒绝。
     shared["approver"] = ConsoleApprover()
@@ -180,7 +187,14 @@ def run_chat(extra_tools: list[Tool] | None = None) -> None:
 
         shared["memory"].append({"role": "user", "content": user_input})
         shared["tool_round"] = 0            # ← 每轮提问重置计数器（重要）
-        flow.run(None)                      # 一环一环跑到没有后继
+        try:
+            flow.run(None)                  # 一环一环跑到没有后继
+        except KeyboardInterrupt:
+            # 打断可能正好落在"assistant 已经写了 tool_calls、tool 结果还没写回"的缝隙里。
+            # 那样的历史下一次请求会被 API 直接拒绝，所以要立刻补一次修复。
+            repaired = shared["memory"].repair()
+            note = "（已清理未完成的工具调用）" if repaired else ""
+            print(f"\n[中断] 本轮已停止{note}，可以继续输入。")
 
 
 def main() -> None:

@@ -1,7 +1,7 @@
 """内置工具包：对外暴露函数 + Tool 定义。"""
 
 from .bash import bash
-from .edit import edit_file
+from .edit import edit_file, edit_preview
 from .find import find
 from .grep import grep
 from .ls import ls
@@ -12,6 +12,6 @@ from .write import write_file
 
 __all__ = [
     "Tool", "get_builtin_tools",
-    "read_file", "write_file", "edit_file", "bash",
+    "read_file", "write_file", "edit_file", "edit_preview", "bash",
     "ls", "grep", "find", "search",
 ]

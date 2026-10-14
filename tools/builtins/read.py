@@ -2,20 +2,14 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
-DEFAULT_MAX_BYTES = 30 * 1024       # 30KB，防止一次读爆上下文
-
-"""读取文件。"""
-
-from pathlib import Path
+from core.workspace import ensure_inside
 
 DEFAULT_MAX_BYTES = 30 * 1024       # 30KB，防止一次读爆上下文
 
 
 def read_file(path: str, offset: int = 1, limit: int | None = None) -> str:
     """读文件内容。offset 从 1 开始（和编辑器行号一致）。"""
-    file_path = Path(path).resolve()
+    file_path = ensure_inside(path)
 
     if not file_path.exists():
         raise FileNotFoundError(f"文件不存在：{path}")

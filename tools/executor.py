@@ -118,6 +118,14 @@ class ToolExecutor:
         tool = self.tool_map.get(name)
         return True if tool is None else tool.requires_approval
 
+    def preview_for(self, name: str, arguments: dict) -> str | None:
+        """取某个工具的确认预览（比如 edit 的 diff）。
+
+        未知工具或没有预览的工具都返回 None —— 确认流程不该依赖预览是否成功。
+        """
+        tool = self.tool_map.get(name)
+        return None if tool is None else tool.build_preview(arguments)
+
 
 def _stringify(value: Any) -> str:
     """统一转成字符串：dict/list 走 JSON，其他直接 str。"""

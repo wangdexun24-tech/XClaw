@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from core.workspace import ensure_inside
 
 DEFAULT_LIMIT = 500
 MAX_BYTES = 30 * 1024
@@ -12,7 +12,7 @@ def ls(path:str=".",limit:int=DEFAULT_LIMIT):
     目录名后加"/",让模型一眼区分目录还是文件
     """
 
-    dir_path = Path(path).resolve()
+    dir_path = ensure_inside(path)
 
     if not dir_path.exists():
         raise FileNotFoundError(f"路径不存在：{path}")

@@ -8,6 +8,11 @@
     requires_approval 执行前要不要问用户（Day 10 加）
                       **默认 True** —— 忘了声明的后果必须是"多问一句"，
                       不能是"默默放行"。纯读工具显式传 False。
+
+还有一个可选的：
+    preview           执行**前**给用户看的预览（Day 11 加）。
+                      只有工具自己知道参数是什么意思，所以预览由工具提供，
+                      确认器和节点都不需要认识具体工具的语义。
 """
 
 from __future__ import annotations
@@ -22,12 +27,29 @@ class Tool:
         parameters: dict,
         fn: Callable,
         requires_approval: bool = True,     # ← 默认「需要确认」
+        preview: Callable[[dict], str | None] | None = None,
     ):
         self.name = name
         self.description = description
         self.parameters = parameters
         self.fn = fn
         self.requires_approval = requires_approval
+        self.preview = preview
+
+    def build_preview(self, arguments: dict) -> str | None:
+        """生成"给用户确认时看"的预览（比如 diff）。默认没有。
+
+        预览是**辅助信息**，不是功能本身，所以它失败时返回 None 而不是抛异常 ——
+        不能因为"看不清预览"就让人没法确认操作。
+        （和 Day 9 "摘要失败就不压缩"是同一个原则：辅助环节失败时，
+          主流程要么安全降级，要么保持原状。）
+        """
+        if self.preview is None:
+            return None
+        try:
+            return self.preview(arguments)
+        except Exception:
+            return None
 
     def to_llm_format(self) -> dict:
         """转成 LLM API 要求的格式（OpenAI / Anthropic 通用）。"""
@@ -46,7 +68,7 @@ class Tool:
 
 def get_builtin_tools() -> List[Tool]:
     """返回全部内置工具。"""
-    from . import bash, edit_file, find, grep, ls, read_file, search, write_file
+    from . import bash, edit_file, edit_preview, find, grep, ls, read_file, search, write_file
 
     return [
         Tool(
@@ -96,6 +118,7 @@ def get_builtin_tools() -> List[Tool]:
                 "required": ["path", "old_text", "new_text"],
             },
             fn=edit_file,
+            preview=edit_preview,
         ),
         Tool(
             name="bash",

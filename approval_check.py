@@ -35,6 +35,7 @@ import examples.chatbot_with_tools.main as chat_module          # noqa: E402
 from core.approval import AutoApprover, scan_command            # noqa: E402
 from core.memory import Memory                                  # noqa: E402
 from core.node import shared                                    # noqa: E402
+from core.workspace import set_workspace                        # noqa: E402
 from tools import ToolExecutor                                  # noqa: E402
 from tools.builtins import Tool, get_builtin_tools              # noqa: E402
 
@@ -71,8 +72,21 @@ class RecordingApprover:
         self.allow = allow
         self.calls: list[dict] = []
 
-    def confirm(self, tool_name: str, arguments: dict, notes: list[str]) -> bool:
-        self.calls.append({"tool": tool_name, "arguments": arguments, "notes": list(notes)})
+    def confirm(
+        self,
+        tool_name: str,
+        arguments: dict,
+        notes: list[str],
+        preview: str | None = None,
+    ) -> bool:
+        self.calls.append(
+            {
+                "tool": tool_name,
+                "arguments": arguments,
+                "notes": list(notes),
+                "preview": preview,
+            }
+        )
         return self.allow
 
 
@@ -93,6 +107,10 @@ def run_flow(script: list[dict], approver, workdir: Path):
     original = chat_module.call_llm
     chat_module.call_llm = fake
 
+    # Day 11：文件工具有了工作区边界，测试必须显式声明"我在这个目录里干活"。
+    # 这不是"为了测试而放开限制"，而是**声明信任上下文** —— 生产代码同样要这么做。
+    set_workspace(workdir)
+
     shared.clear()
     executor = ToolExecutor()
     shared["tool_executor"] = executor
@@ -108,6 +126,7 @@ def run_flow(script: list[dict], approver, workdir: Path):
         messages = list(shared["memory"].messages)
     finally:
         chat_module.call_llm = original
+        set_workspace(PROJECT_ROOT)      # 还回去，别污染后面的用例
 
     return messages, executor, fake
 
@@ -208,6 +227,9 @@ def check_pairing_and_execution() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         root = Path(temp_dir)
         created = root / "created.txt"
+        # 在工作区里造一个真目录，好让免确认的 ls 有东西可列
+        (root / "tools").mkdir()
+        (root / "tools" / "read.py").write_text("x", encoding="utf-8")
         script = [
             {
                 "role": "assistant",
@@ -245,7 +267,7 @@ def check_pairing_and_execution() -> None:
         print(f"  ✓ tool_calls {call_ids} ↔ tool 消息 {result_ids} 一一配对")
 
         by_id = {m["tool_call_id"]: m["content"] for m in results}
-        assert "没有" not in by_id["c1"] and by_id["c1"], "ls 应该真的执行了"
+        assert "read.py" in by_id["c1"], f"ls 应该真的列出了目录内容，实际：{by_id['c1']}"
         assert "未获得用户确认" in by_id["c2"]
         assert "未获得用户确认" in by_id["c3"]
         assert not created.exists(), "被拒绝的 write 竟然真的写了文件"
